@@ -6,6 +6,9 @@ from torch_geometric.data import Data
 import torch
 import os
 from typing import Tuple
+import subprocess
+import time
+import kahypar as kahypar
 
 def create_clique_expansion_graph(hypergraph_vertices, hypergraph_edges) -> Tuple[coo_matrix, np.ndarray, np.ndarray]:
     node_degree = np.zeros(len(hypergraph_vertices))
@@ -44,6 +47,14 @@ def normalize_adj(adj: coo_matrix) -> coo_matrix:
     return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
 
 def compute_topological_features(adj_matrix: coo_matrix, d: int, adj_normalize: bool, feature_abs: bool) -> np.ndarray:
+    # rowsum = np.array(adj_matrix.sum(1)).squeeze(1)
+    # data = -adj_matrix.data
+    # laplace_data = np.concatenate((data, rowsum))
+    # diag = np.arange(len(rowsum))
+    # laplace = coo_matrix((laplace_data, (np.concatenate((adj_matrix.row, diag)), np.concatenate((adj_matrix.col, diag)))), shape=(len(rowsum), len(rowsum)))
+    # if adj_normalize:
+    #    laplace = normalize_adj(laplace)
+    # lamb, X = eigs(laplace, d)
     if adj_normalize:
        adj_matrix = normalize_adj(adj_matrix)
     lamb, X = eigs(adj_matrix, d)
@@ -105,3 +116,56 @@ def evaluate_partition(partition: np.ndarray, hypergraph_vertices, hypergraph_ed
             cut += 1
     imbalance = np.max((partition_weights - np.mean(partition_weights)) / np.mean(partition_weights))
     return cut, imbalance
+
+def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_partitions, filename, use_kahypar=False):
+    num_nodes = len(hypergraph_vertices)
+    num_nets = len(hypergraph_edges)
+    with open(f'./data/{filename}.part.2.{id}', 'w') as f:
+        for i in range(len(partition)):
+            f.write(f'{partition[i]}\n')
+    command = ['./exec/EasyPart', '-g', f'./data/{filename}', '-e', '0.04', '-p', '2', '-t', '1', '-m', 'quality', '-f', f'./data/{filename}.part.2.{id}', '-o', '1']
+    channel = subprocess.DEVNULL
+    try:
+        subprocess.run(command, shell=False, stdout=channel, stderr=channel)
+    except Exception:
+        pass
+
+    # command = ['./exec/KaHyPar', '-h', f'./data/{filename}', '-k', '2', '-e', '0.04', '-o', 'cut', '-m', 'direct', '-p', './exec/cut_kKaHyPar_sea20.ini', '--part-file', f'./data/{filename}.part.2.{id}', '-w', '1']
+    # try:
+    #     subprocess.run(command, shell=False, stdout=channel, stderr=channel)
+    # except Exception:
+    #     pass
+
+    if use_kahypar:
+        hyperedge_indices = []
+        hyperedges = []
+        index = 0
+        for edge in hypergraph_edges:
+            hyperedge_indices.append(index)
+            index += len(edge)
+            hyperedges.extend(edge)
+        hyperedge_indices.append(index)
+        hypergraph = kahypar.Hypergraph(num_nodes, num_nets, hyperedge_indices, hyperedges, num_partitions)
+        context = kahypar.Context()
+        context.loadINIconfiguration("./exec/cut_kKaHyPar_sea20.ini")
+        context.setK(num_partitions)
+        context.setEpsilon(0.04)
+        context.setInputPartitionFileName(f'./data/{filename}.part.2.{id}')
+        context.writePartitionFile(True)
+        context.setPartitionFileName(f'./data/{filename}.part.2.{id}')
+        context.suppressOutput(True)
+        kahypar.partition(hypergraph, context)
+
+    partition_id = np.zeros(num_nodes)
+    index = 0
+    with open(f'./data/{filename}.part.2.{id}', 'r') as f:
+        for line in f:
+            partition_id[index] = int(line.strip())
+            index += 1
+    command = ['rm', f'./data/{filename}.part.2.{id}']
+    try:
+        subprocess.run(command, shell=False, stdout=channel, stderr=channel)
+    except Exception:
+        pass
+    cut, imbalance = evaluate_partition(partition_id, hypergraph_vertices, hypergraph_edges, num_partitions)
+    return cut, imbalance, partition_id
