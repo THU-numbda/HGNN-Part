@@ -21,6 +21,17 @@ class HyperData:
             self.hyperedge_weight = self.hyperedge_weight.to(device)
         return self
 
+class NewHyperData(Data):
+    def __init__(self, x, hyperedge_index):
+        super().__init__()
+        self.x = x
+        self.hyperedge_index = hyperedge_index
+
+    def to(self, device):
+        self.x = self.x.to(device)
+        self.hyperedge_index = self.hyperedge_index.to(device)
+        return self
+
 class HypergraphPartitionModel(nn.Module):
     def __init__(self, input_dim=5, hidden_dim=256, latent_dim=64, num_partitions=2):
         super().__init__()
@@ -43,7 +54,7 @@ class HypergraphPartitionModel(nn.Module):
                 stdv = 1. / math.sqrt(p.size(0))
                 p.data.uniform_(-stdv, stdv)
 
-    def forward(self, data: HyperData):
+    def forward(self, data: NewHyperData):
         # x = F.dropout(data.x, p=0.2, training=self.training)
         x = F.elu(self.conv1(data.x, data.hyperedge_index))
         x = F.elu(self.conv2(x, data.hyperedge_index))
@@ -91,9 +102,9 @@ class VariationalEncoder(nn.Module):
                 stdv = 1. / math.sqrt(p.size(0))
                 p.data.uniform_(-stdv, stdv)
 
-    def forward(self, data: Union[Data, HyperData]):
+    def forward(self, data: Union[Data, NewHyperData]):
         x = data.x if isinstance(data, Data) else data.x
-        edge_index = data.edge_index if isinstance(data, Data) else data.hyperedge_index
+        edge_index = data.hyperedge_index if isinstance(data, NewHyperData) else data.edge_index
         x = F.dropout(x, p=0.2, training=self.training)
         x = F.relu(self.conv1(x, edge_index))
         x = F.relu(self.conv2(x, edge_index))
