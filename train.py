@@ -4,7 +4,7 @@ from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader
 from transformers import set_seed
 import os
-from models import GraphPartitionModel, NewHyperData, HyperData
+from models import GraphPartitionModel, HyperData
 
 class ISPDDataset(Dataset):
     def __init__(self, root):
@@ -17,7 +17,7 @@ class ISPDDataset(Dataset):
     def get(self, idx):
         filename = self.data_files[idx]
         pt = torch.load(os.path.join(self.root, filename, filename + '.pt'))
-        data = NewHyperData(x=pt.x, hyperedge_index=pt.hyperedge_index)
+        data = HyperData(x=pt.x, hyperedge_index=pt.hyperedge_index)
         return data
 
 if __name__ == '__main__':
@@ -44,7 +44,8 @@ if __name__ == '__main__':
             Y = model(data)
             num_nodes, num_nets = data.x.shape[0], data.hyperedge_index[1][-1].item() + 1
             W = torch.sparse_coo_tensor(data.hyperedge_index, torch.ones(data.hyperedge_index.shape[1]).to(device), (num_nodes, num_nets)).to(device)
-            loss, kl_loss, hyperedge_cut_loss, balance_loss = model.combined_loss_uncertainty(Y, W)
+            D = torch.sparse.sum(W, dim=1).to_dense().unsqueeze(1)
+            loss, kl_loss, hyperedge_cut_loss, balance_loss = model.combined_loss(Y, W, D)
             if not loss.isnan():
                 loss.backward()
                 # torch.nn.utils.clip_grad_norm_(model.parameters(), 3)

@@ -25,13 +25,13 @@ if __name__ == '__main__':
         lines = f.readlines()
         num_nets, num_nodes = map(int, lines[0].split())
         hypergraph_vertices = list(range(num_nodes))
-        hypergraph_edges = [], trunc_hypergraph_edges = []
+        hypergraph_edges, trunc_hypergraph_edges = [], []
         for line in lines[1:]:
             hypergraph_edges.append([int(node) - 1 for node in line.split()])
             if len(line.split()) > 1000:
                 continue
             trunc_hypergraph_edges.append([int(node) - 1 for node in line.split()])
-    data = preprocess_data(hypergraph_vertices, trunc_hypergraph_edges, filename, num_nodes, num_nets)
+    data, initial_partition = preprocess_data(hypergraph_vertices, trunc_hypergraph_edges, filename, num_nodes, num_nets)
     data = data.to(device)
     t1 = time.time()
     preprocess_time += t1 - t0
@@ -39,12 +39,11 @@ if __name__ == '__main__':
     latent_dim = 64
     hidden_dim = 256
     num_partitions = 2
-    num_epochs = 50
     model = GraphPartitionModel(input_dim, hidden_dim, latent_dim, num_partitions, True)
     model.load_state_dict(torch.load(f'./models/{modelname}.pt', map_location=device))
     model = model.to(device)
     model.eval()
-    best_cut, best_imbalance = evaluate_partition(0, hypergraph_vertices, hypergraph_edges, num_partitions)
+    best_cut, best_imbalance = evaluate_partition(initial_partition, hypergraph_vertices, hypergraph_edges, num_partitions)
     reason_time = 0
     vcycle_time = 0
     for tau in range(10):

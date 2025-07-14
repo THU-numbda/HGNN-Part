@@ -8,20 +8,7 @@ from torch_scatter import scatter_sum, scatter_mul
 import math
 from typing import Union
 
-class HyperData:
-    def __init__(self, x, hyperedge_index, hyperedge_weight=None):
-        self.x = x
-        self.hyperedge_index = hyperedge_index
-        self.hyperedge_weight = hyperedge_weight
-
-    def to(self, device):
-        self.x = self.x.to(device)
-        self.hyperedge_index = self.hyperedge_index.to(device)
-        if self.hyperedge_weight is not None:
-            self.hyperedge_weight = self.hyperedge_weight.to(device)
-        return self
-
-class NewHyperData(Data):
+class HyperData(Data):
     def __init__(self, x, hyperedge_index):
         super().__init__()
         self.x = x
@@ -32,18 +19,16 @@ class NewHyperData(Data):
         self.hyperedge_index = self.hyperedge_index.to(device)
         return self
 
-class HypergraphPartitionModel(nn.Module):
-    def __init__(self, input_dim=5, hidden_dim=256, latent_dim=64, num_partitions=2):
+class OldVariationalEncoder(nn.Module):
+    def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, use_hypergraph=False):
         super().__init__()
-        self.conv1 = HypergraphConv(input_dim, hidden_dim , dropout=0.2)
-        self.conv2 = HypergraphConv(hidden_dim, hidden_dim, dropout=0.2)
-        self.conv3 = HypergraphConv(hidden_dim, hidden_dim, dropout=0.2)
-        self.conv4 = HypergraphConv(hidden_dim, hidden_dim, dropout=0.2)
-        self.conv5 = HypergraphConv(hidden_dim, latent_dim, dropout=0.2)
-        self.fc1 = nn.Linear(latent_dim, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc_out = nn.Linear(64, 2)
-        self.num_partitions = num_partitions
+        self.conv1 = HypergraphConv(input_dim, hidden_dim) if use_hypergraph else GraphConv(input_dim, hidden_dim)
+        self.conv2 = HypergraphConv(hidden_dim, hidden_dim) if use_hypergraph else GraphConv(hidden_dim, hidden_dim)
+        self.conv3 = HypergraphConv(hidden_dim, hidden_dim) if use_hypergraph else GraphConv(hidden_dim, hidden_dim)
+        self.conv4 = HypergraphConv(hidden_dim, hidden_dim) if use_hypergraph else GraphConv(hidden_dim, hidden_dim)
+        self.fc_mu = HypergraphConv(hidden_dim, latent_dim) if use_hypergraph else GraphConv(hidden_dim, latent_dim)
+        self.fc_logstd = HypergraphConv(hidden_dim, latent_dim) if use_hypergraph else GraphConv(hidden_dim, latent_dim)
+        self.mask_token = nn.Parameter(torch.randn(1, input_dim))
         self.init_weights()
 
     def init_weights(self):
@@ -54,37 +39,28 @@ class HypergraphPartitionModel(nn.Module):
                 stdv = 1. / math.sqrt(p.size(0))
                 p.data.uniform_(-stdv, stdv)
 
-    def forward(self, data: NewHyperData):
-        # x = F.dropout(data.x, p=0.2, training=self.training)
-        x = F.elu(self.conv1(data.x, data.hyperedge_index))
-        x = F.elu(self.conv2(x, data.hyperedge_index))
-        x = F.elu(self.conv3(x, data.hyperedge_index))
-        x = F.elu(self.conv4(x, data.hyperedge_index))
-        x = F.elu(self.conv5(x, data.hyperedge_index))
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.softmax(self.fc_out(x), dim=-1)
-        return x
-    
-    def hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-        row, col = W._indices()[0], W._indices()[1]
-        sorted_col, sorted_idx = torch.sort(col)
-        sorted_row = row[sorted_idx]
-        Y_expanded = Y[sorted_row]
-        prod_per_edge_per_partition = torch.zeros(W.shape[1], self.num_partitions, device=Y.device)
-        for j in range(self.num_partitions):
-            prod_per_edge_per_partition[:, j] = scatter_mul(Y_expanded[:, j], sorted_col, dim=0)
-        return W.shape[1] - torch.sum(torch.sum(prod_per_edge_per_partition, dim=1))
-
-    def normalized_hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-        cut_loss = self.hyperedge_cut_loss(Y, W)
-        partition_sizes = Y.sum(dim=0)
-        return cut_loss * torch.sum(partition_sizes.pow(-1))
+    def forward(self, data: Union[Data, HyperData]):
+        x = data.x if isinstance(data, Data) else data.x
+        edge_index = data.hyperedge_index if isinstance(data, HyperData) else data.edge_index
+        # x = F.dropout(x, p=0.2, training=self.training)
+        x_clone = x.clone()
+        if self.training:
+            num_nodes = x_clone.size(0)
+            num_mask = max(1, int(0.2 * num_nodes))
+            perm = torch.randperm(num_nodes, device=x_clone.device)
+            masked_indices = perm[:num_mask]
+            x_clone[masked_indices] = self.mask_token.to(x.dtype)
+        x1 = F.relu(self.conv1(x_clone, edge_index))
+        x2 = F.relu(self.conv2(x1, edge_index))
+        x3 = F.relu(self.conv3(x2, edge_index))
+        x4 = F.relu(self.conv4(x3, edge_index))
+        mu = self.fc_mu(x4, edge_index)
+        logstd = self.fc_logstd(x4, edge_index)
+        return mu, logstd
 
 class VariationalEncoder(nn.Module):
-    def __init__(self, input_dim=5, hidden_dim=256, latent_dim=64, use_hypergraph=False):
+    def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, use_hypergraph=False):
         super().__init__()
-        # 图卷积层
         self.conv1 = HypergraphConv(input_dim, hidden_dim) if use_hypergraph else GraphConv(input_dim, hidden_dim)
         self.ln1 = nn.LayerNorm(hidden_dim)
         self.conv2 = HypergraphConv(hidden_dim, hidden_dim) if use_hypergraph else GraphConv(hidden_dim, hidden_dim)
@@ -93,11 +69,9 @@ class VariationalEncoder(nn.Module):
         self.ln3 = nn.LayerNorm(hidden_dim)
         self.conv3 = HypergraphConv(hidden_dim, hidden_dim) if use_hypergraph else GraphConv(hidden_dim, hidden_dim)
         self.ln4 = nn.LayerNorm(hidden_dim)
-        # self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        # self.fc_logstd = nn.Linear(hidden_dim, latent_dim)
         self.fc_mu = HypergraphConv(hidden_dim, latent_dim) if use_hypergraph else GraphConv(hidden_dim, latent_dim)
         self.fc_logstd = HypergraphConv(hidden_dim, latent_dim) if use_hypergraph else GraphConv(hidden_dim, latent_dim)
-        self.mask_token = nn.Parameter(torch.randn(1, input_dim))  # Mask token for input
+        self.mask_token = nn.Parameter(torch.randn(1, input_dim))
         self.init_weights()
 
     def init_weights(self):
@@ -108,9 +82,9 @@ class VariationalEncoder(nn.Module):
                 stdv = 1. / math.sqrt(p.size(0))
                 p.data.uniform_(-stdv, stdv)
 
-    def forward(self, data: Union[Data, NewHyperData]):
+    def forward(self, data: Union[Data, HyperData]):
         x = data.x if isinstance(data, Data) else data.x
-        edge_index = data.hyperedge_index if isinstance(data, NewHyperData) else data.edge_index
+        edge_index = data.hyperedge_index if isinstance(data, HyperData) else data.edge_index
         # x = F.dropout(x, p=0.2, training=self.training)
         x_clone = x.clone()
         if self.training:
@@ -141,8 +115,8 @@ class PartitionDecoder(nn.Module):
         return x
 
 class GraphPartitionModel(VGAE):
-    def __init__(self, input_dim=5, hidden_dim=256, latent_dim=64, num_partitions=2, use_hypergraph=False):
-        super().__init__(VariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
+    def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, num_partitions=2, use_hypergraph=False):
+        super().__init__(OldVariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
         self.num_partitions = num_partitions
         self.log_vars = nn.Parameter(torch.zeros(3))
         self.use_hypergraph = use_hypergraph
@@ -171,7 +145,7 @@ class GraphPartitionModel(VGAE):
     def balance_loss(self, Y: torch.Tensor):
         ideal_size = Y.shape[0] / self.num_partitions
         partition_sizes = Y.sum(dim=0)
-        return torch.sum((partition_sizes - ideal_size).pow(2))
+        return torch.sum(((partition_sizes - ideal_size) / ideal_size).pow(2))
     
     def normalized_hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
         cut_loss = self.hyperedge_cut_loss(Y, W)

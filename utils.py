@@ -2,7 +2,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import eigs
 from scipy.sparse import coo_matrix
-from models import NewHyperData
+from models import HyperData
 import torch
 import os
 from typing import Tuple
@@ -99,7 +99,7 @@ def preprocess_data(hypergraph_vertices, hypergraph_edges, filename, num_nodes, 
     star_topo_features = torch.tensor(U.copy(), dtype=torch.float)
     partition_feature = create_partition_id_feature(len(hypergraph_vertices), filename)
     features = np.column_stack([clique_topo_features, star_topo_features, node_degree, pin_count, partition_feature])
-    del adj_matrix, node_degree, pin_count, clique_topo_features, star_topo_features, partition_feature, H, U, S, Vt
+    del adj_matrix, node_degree, pin_count, clique_topo_features, star_topo_features, H, U, S, Vt
     deg_feature_norm = np.linalg.norm(features[:, 4])
     features[:, 0] = features[:, 0] / np.linalg.norm(features[:, 0]) * deg_feature_norm
     features[:, 1] = features[:, 1] / np.linalg.norm(features[:, 1]) * deg_feature_norm
@@ -112,8 +112,8 @@ def preprocess_data(hypergraph_vertices, hypergraph_edges, filename, num_nodes, 
         np.repeat(np.arange(len(hypergraph_edges)), [len(e) for e in hypergraph_edges])
     ]), dtype=torch.long)
     x = torch.tensor(features, dtype=torch.float)
-    data = NewHyperData(x=x, hyperedge_index=hyperedge_index)
-    return data
+    data = HyperData(x=x, hyperedge_index=hyperedge_index)
+    return data, partition_feature
 
 def evaluate_partition(partition: np.ndarray, hypergraph_vertices, hypergraph_edges, num_partitions):
     cut = 0
