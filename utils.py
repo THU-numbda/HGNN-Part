@@ -40,6 +40,17 @@ def create_clique_expansion_graph(hypergraph_vertices, hypergraph_edges) -> Tupl
     adj_matrix = coo_matrix((data, (row, col)), shape=(num_nodes, num_nodes))
     return adj_matrix, node_degree, pin_count
 
+def normalize_hypergraph_incidence_matrix(H: coo_matrix) -> coo_matrix:
+    d_v = np.array(H.sum(axis=1)).flatten()
+    d_e = np.array(H.sum(axis=0)).flatten()
+    d_v_inv_sqrt = np.power(d_v, -0.5).flatten()
+    d_e_inv_sqrt = np.power(d_e, -0.5).flatten()
+    d_v_inv_sqrt[np.isinf(d_v_inv_sqrt)] = 0.
+    d_e_inv_sqrt[np.isinf(d_e_inv_sqrt)] = 0.
+    d_v_mat_inv_sqrt = sp.diags(d_v_inv_sqrt)
+    d_e_mat_inv_sqrt = sp.diags(d_e_inv_sqrt)
+    return (d_v_mat_inv_sqrt @ H @ d_e_mat_inv_sqrt).tocoo()
+
 def normalize_adj(adj: coo_matrix) -> coo_matrix:
     rowsum = np.array(adj.sum(1))
     d_inv_sqrt = np.power(rowsum, -0.5).flatten()
@@ -91,7 +102,8 @@ def preprocess_data(hypergraph_vertices, hypergraph_edges, filename, num_nodes, 
             col.append(i)
             value.append(1)
     H = coo_matrix((value, (row, col)), shape=(num_nodes, num_nets), dtype=float)
-    U, S, Vt = svds(H, k=2, which='LM', random_state=42, solver='lobpcg', maxiter=10000)
+    H = normalize_hypergraph_incidence_matrix(H)
+    U, S, Vt = svds(H, k=2, which='LM', random_state=42, solver='propack', maxiter=10000)
     U = U[:, np.argsort(S)[::-1]]
     for i in range(U.shape[1]):    
         if U[np.argmax(np.absolute(U[:,i])),i] < 0:
@@ -130,18 +142,20 @@ def evaluate_partition(partition: np.ndarray, hypergraph_vertices, hypergraph_ed
     imbalance = np.max((partition_weights - np.mean(partition_weights)) / np.mean(partition_weights))
     return cut, imbalance
 
-def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_partitions, filename, use_kahypar=False):
+def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_partitions, filename, use_easypart=True, use_kahypar=False):
     num_nodes = len(hypergraph_vertices)
     num_nets = len(hypergraph_edges)
     with open(f'./data/{filename}.part.2.{id}', 'w') as f:
         for i in range(len(partition)):
             f.write(f'{partition[i]}\n')
-    command = ['./exec/EasyPart', '-g', f'./data/{filename}', '-e', '0.04', '-p', '2', '-t', '1', '-m', 'quality', '-f', f'./data/{filename}.part.2.{id}', '-o', '1']
-    channel = subprocess.DEVNULL
-    try:
-        subprocess.run(command, shell=False, stdout=channel, stderr=channel)
-    except Exception:
-        pass
+
+    if use_easypart:
+        command = ['./exec/EasyPart', '-g', f'./data/{filename}', '-e', '0.04', '-p', '2', '-t', '1', '-m', 'quality', '-f', f'./data/{filename}.part.2.{id}', '-o', '1']
+        channel = subprocess.DEVNULL
+        try:
+            subprocess.run(command, shell=False, stdout=channel, stderr=channel)
+        except Exception:
+            pass
 
     # command = ['./exec/KaHyPar', '-h', f'./data/{filename}', '-k', '2', '-e', '0.04', '-o', 'cut', '-m', 'direct', '-p', './exec/cut_kKaHyPar_sea20.ini', '--part-file', f'./data/{filename}.part.2.{id}', '-w', '1']
     # try:

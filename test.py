@@ -52,7 +52,7 @@ if __name__ == '__main__':
         t1 = time.time()
         reason_time += t1 - t0
         t0 = time.time()
-        cut, imbalance, partition_id = evalPoint(0, partitions[0], hypergraph_vertices, hypergraph_edges, 2, filename, True)
+        cut, imbalance, partition_id = evalPoint(0, partitions[0], hypergraph_vertices, hypergraph_edges, 2, filename, True, True)
         if cut < best_cut:
             best_cut = cut
             best_imbalance = imbalance
