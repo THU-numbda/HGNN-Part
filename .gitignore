@@ -1,3 +1,6 @@
 dataset
 exec
 __pycache__
+models/*.pt
+results/*.csv
+data/*.hgr.part*

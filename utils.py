@@ -81,7 +81,7 @@ def compute_topological_features(adj_matrix: coo_matrix, d: int, adj_normalize: 
 
 def create_partition_id_feature(num_nodes, filename):
     partition_feature = []
-    os.system(f'./exec/hmetis2.0pre1 ./data/{filename} 2 -ufactor=2 -ptype=rb -otype=cut -nruns=1 -seed=42')
+    os.system(f'./exec/hmetis2.0pre1 ./data/{filename} 2 -ufactor=2 -ptype=rb -otype=cut -nruns=1 -seed=42 > /dev/null')
     with open(f'./data/{filename}.part.2', 'r') as f:
         for line in f:
             partition_id = int(line.strip())

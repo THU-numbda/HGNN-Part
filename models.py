@@ -106,7 +106,7 @@ class PartitionDecoder(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(latent_dim, 64)
         self.fc2 = nn.Linear(64, 64)
-        self.fc_out = nn.Linear(64, num_partitions)  # 输出分区数量
+        self.fc_out = nn.Linear(64, num_partitions)
 
     def forward(self, z):
         x = F.relu(self.fc1(z))

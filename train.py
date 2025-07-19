@@ -4,6 +4,8 @@ from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader
 from transformers import set_seed
 import os
+import argparse
+import gc
 from models import GraphPartitionModel, HyperData
 
 class ISPDDataset(Dataset):
@@ -24,16 +26,23 @@ if __name__ == '__main__':
     torch.cuda.set_device(1)
     set_seed(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--lr', type=float, default=5e-5)
+    parser.add_argument('--alpha', type=float, default=0.0005)
+    parser.add_argument('--beta', type=float, default=5)
+    parser.add_argument('--gamma', type=float, default=1)
+    parser.add_argument('--epochs', type=int, default=50)
+    args = parser.parse_args()
     dataset = ISPDDataset('/data1/tongsb/GraphPart/dataset/pt/train')
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
     input_dim = 7
     latent_dim = 64
     hidden_dim = 256
     num_partitions = 2
-    num_epochs = 50
+    num_epochs = args.epochs
     model = GraphPartitionModel(input_dim, hidden_dim, latent_dim, num_partitions, True)
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     model.train()
     for epoch in range(num_epochs):
         losses, kl_losses, hyperedge_cut_losses, balance_losses = [], [], [], []
@@ -45,7 +54,7 @@ if __name__ == '__main__':
             num_nodes, num_nets = data.x.shape[0], data.hyperedge_index[1][-1].item() + 1
             W = torch.sparse_coo_tensor(data.hyperedge_index, torch.ones(data.hyperedge_index.shape[1]).to(device), (num_nodes, num_nets)).to(device)
             D = torch.sparse.sum(W, dim=1).to_dense().unsqueeze(1)
-            loss, kl_loss, hyperedge_cut_loss, balance_loss = model.combined_loss(Y, W, D)
+            loss, kl_loss, hyperedge_cut_loss, balance_loss = model.combined_loss(Y, W, D, alpha=args.alpha, beta=args.beta, gamma=args.gamma)
             if not loss.isnan():
                 loss.backward()
                 # torch.nn.utils.clip_grad_norm_(model.parameters(), 3)
@@ -56,10 +65,13 @@ if __name__ == '__main__':
                 balance_losses.append(balance_loss.item())
             else:
                 print('Loss is NaN!')
-            del data, W, Y, loss, kl_loss, hyperedge_cut_loss, balance_loss
+            del data, W, Y, D, loss, kl_loss, hyperedge_cut_loss, balance_loss
             torch.cuda.empty_cache()
-        print(f'Epoch {epoch + 1}, Loss: {np.mean(losses):.4e}, KL Loss: {np.mean(kl_losses):.4e}, Ncut Loss: {np.mean(hyperedge_cut_losses):.4e}, Balance Loss: {np.mean(balance_losses):.4e}')
-        if np.mean(hyperedge_cut_losses) < min_ncut_loss:
-            min_ncut_loss = np.mean(hyperedge_cut_losses)
-            torch.save(model.state_dict(), './models/model.best.pt')
-    torch.save(model.state_dict(), './models/model.pt')
+            gc.collect()
+        peak_memory_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        print(f'Epoch {epoch + 1}, Loss: {np.mean(losses):.4e}, KL Loss: {np.mean(kl_losses):.4e}, Ncut Loss: {np.mean(hyperedge_cut_losses):.4e}, Balance Loss: {np.mean(balance_losses):.4e}, Peak Memory: {peak_memory_gb:.2f} GB')
+        # if np.mean(hyperedge_cut_losses) < min_ncut_loss:
+        #     min_ncut_loss = np.mean(hyperedge_cut_losses)
+        #     torch.save(model.state_dict(), './models/model.best.pt')
+    torch.save(model.state_dict(), f'./models/model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
+    print(f'Model saved as model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
