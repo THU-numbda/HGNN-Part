@@ -36,17 +36,17 @@ class MultiObjectiveOptimizer:
         self.best_trials = []
         self.config = HyperOptConfig()
         
-        # Initialize Optuna study
+        # Initialize Optuna study with cut loss priority
         storage_url = f"sqlite:///{self.output_dir}/optuna_study.db"
         self.study = optuna.create_study(
-            directions=['minimize', 'minimize', 'maximize', 'maximize'],  # cut, balance, quality, stability
+            directions=['minimize', 'minimize', 'maximize', 'maximize'],  # cut, balance_penalty, quality, stability
             study_name='graphpart_hyperopt',
             storage=storage_url,
             load_if_exists=True,
             pruner=optuna.pruners.MedianPruner(
-                n_startup_trials=10,
-                n_warmup_steps=20,
-                interval_steps=5
+                n_startup_trials=15,  # More startup trials for better cut loss focus
+                n_warmup_steps=25,
+                interval_steps=3  # More aggressive pruning
             )
         )
         
@@ -157,10 +157,10 @@ class MultiObjectiveOptimizer:
         """Sample parameters for coarse search with broader ranges"""
         params = {}
         
-        # Use broader ranges for coarse search
+        # Use broader ranges for coarse search, prioritizing cut loss
         params['learning_rate'] = trial.suggest_loguniform('learning_rate', 1e-5, 1e-2)
-        params['beta'] = trial.suggest_uniform('beta', 2.0, 20.0)  # Broader range
-        params['gamma'] = trial.suggest_uniform('gamma', 1.0, 10.0)
+        params['beta'] = trial.suggest_uniform('beta', 15.0, 40.0)  # Higher cut loss weight
+        params['gamma'] = trial.suggest_uniform('gamma', 0.3, 3.0)  # Lower balance weight
         params['alpha'] = trial.suggest_loguniform('alpha', 1e-5, 1e-2)
         
         # Architecture parameters
@@ -178,7 +178,7 @@ class MultiObjectiveOptimizer:
         """Sample parameters around a good configuration for fine-tuning"""
         params = base_params.copy()
         
-        # Fine-tune around base values with smaller ranges
+        # Fine-tune around base values with cut loss priority
         if 'learning_rate' in base_params:
             base_lr = base_params['learning_rate']
             params['learning_rate'] = trial.suggest_loguniform('learning_rate', 
@@ -186,13 +186,15 @@ class MultiObjectiveOptimizer:
         
         if 'beta' in base_params:
             base_beta = base_params['beta']
+            # Keep beta high for cut loss priority
             params['beta'] = trial.suggest_uniform('beta', 
-                max(1.0, base_beta * 0.5), base_beta * 1.5)
+                max(10.0, base_beta * 0.7), base_beta * 1.3)
         
         if 'gamma' in base_params:
             base_gamma = base_params['gamma']
+            # Keep gamma low but sufficient for balance
             params['gamma'] = trial.suggest_uniform('gamma',
-                max(0.5, base_gamma * 0.5), base_gamma * 1.5)
+                max(0.1, base_gamma * 0.5), min(base_gamma * 1.5, 3.0))
         
         # Add additional parameters for fine-tuning
         params['weight_decay'] = trial.suggest_loguniform('weight_decay', 1e-6, 1e-3)
@@ -233,10 +235,10 @@ class MultiObjectiveOptimizer:
         params['dropout_rate'] = trial.suggest_uniform('dropout_rate', 0.0, 0.5)
         params['mask_rate'] = trial.suggest_uniform('mask_rate', 0.1, 0.4)
         
-        # Loss weights - Critical for target achievement
-        params['alpha'] = trial.suggest_loguniform('alpha', 1e-5, 1e-2)
-        params['beta'] = trial.suggest_uniform('beta', 3.0, 30.0)  # Higher range for cut loss
-        params['gamma'] = trial.suggest_uniform('gamma', 2.0, 15.0)  # Higher range for balance
+        # Loss weights - Prioritize cut loss minimization with balance constraint
+        params['alpha'] = trial.suggest_loguniform('alpha', 1e-5, 5e-3)  # KL regularization
+        params['beta'] = trial.suggest_uniform('beta', 10.0, 50.0)  # Much higher for cut loss priority
+        params['gamma'] = trial.suggest_uniform('gamma', 0.5, 5.0)   # Lower range, just enough for balance
         
         # Advanced features
         params['adaptive_weights'] = trial.suggest_categorical('adaptive_weights', [True, False])
@@ -259,8 +261,9 @@ class MultiObjectiveOptimizer:
     def _objective_function(self, trial, params: Dict, max_epochs: int = 200, 
                           final_validation: bool = False) -> Tuple[float, float, float, float]:
         """
-        Objective function to minimize cut_loss, balance_loss and maximize quality, stability
-        Returns: (cut_loss, balance_loss, -quality_score, -stability_score)
+        Objective function prioritizing cut loss minimization with balance constraint
+        Balance constraint: imbalance < 2% (balance_loss < 0.02)
+        Returns: (cut_loss, balance_penalty, -quality_score, -stability_score)
         """
         try:
             # Train model with given parameters
@@ -271,16 +274,26 @@ class MultiObjectiveOptimizer:
             quality_score = results['quality_score']
             stability_score = results['stability_score']
             
-            # Early pruning if targets not met
-            if not final_validation and cut_loss > 0.1 and trial.number > 10:
+            # Convert balance loss to imbalance percentage (approximation)
+            # balance_loss is squared relative error, so imbalance ≈ sqrt(balance_loss)
+            imbalance_pct = torch.sqrt(torch.tensor(balance_loss)).item() * 100
+            
+            # Apply penalty if balance constraint is violated (>2% imbalance)
+            balance_penalty = balance_loss
+            if imbalance_pct > 2.0:
+                # Heavy penalty for constraint violation
+                balance_penalty = balance_loss * 10.0 + (imbalance_pct - 2.0) ** 2
+            
+            # Early pruning if cut loss too high or severe imbalance
+            if not final_validation and (cut_loss > 0.1 or imbalance_pct > 5.0) and trial.number > 10:
                 raise optuna.TrialPruned()
             
-            # Log trial results
+            # Log trial results with imbalance percentage
             self.logger.info(f"Trial {trial.number}: cut={cut_loss:.4f}, balance={balance_loss:.6f}, "
-                           f"quality={quality_score:.3f}, stability={stability_score:.3f}")
+                           f"imbalance={imbalance_pct:.2f}%, quality={quality_score:.3f}, stability={stability_score:.3f}")
             
-            # Return objectives (minimize cut/balance, maximize quality/stability)
-            return cut_loss, balance_loss, -quality_score, -stability_score
+            # Return objectives (minimize cut/balance_penalty, maximize quality/stability)
+            return cut_loss, balance_penalty, -quality_score, -stability_score
             
         except Exception as e:
             self.logger.error(f"Trial {trial.number} failed: {str(e)}")
@@ -289,62 +302,228 @@ class MultiObjectiveOptimizer:
     
     def _train_with_params(self, params: Dict, max_epochs: int, trial, 
                           final_validation: bool = False) -> Dict:
-        """Train model with given parameters and return metrics"""
-        # This would contain the full training logic
-        # For now, return a placeholder structure
+        """Train model with given parameters and return real metrics"""
+        import torch.nn.functional as F
+        import numpy as np
         
         # Import necessary modules
         from train import ISPDDataset
         from torch_geometric.loader import DataLoader
-        from models import GraphPartitionModel, HyperData
-        from convergence_monitor import ConvergenceMonitor, AdaptiveLossWeighting, QualityEvaluator
+        from models import GraphPartitionModel
         
-        # Setup training
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        try:
+            # Setup training
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            # Create dataset
+            dataset = ISPDDataset(self.data_path)
+            dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+            
+            # Initialize model with parameters
+            model = GraphPartitionModel(
+                input_dim=7,
+                hidden_dim=params.get('hidden_dim', 256),
+                latent_dim=params.get('latent_dim', 64),
+                num_partitions=2,
+                use_hypergraph=True
+            ).to(device)
+            
+            # Setup optimizer
+            optimizer = torch.optim.Adam(
+                model.parameters(), 
+                lr=params.get('learning_rate', 5e-5),
+                weight_decay=params.get('weight_decay', 1e-5)
+            )
+            
+            # Setup scheduler
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=params.get('scheduler_factor', 0.5), 
+                patience=params.get('scheduler_patience', 8), verbose=False
+            )
+            
+            # Training parameters
+            alpha = params.get('alpha', 0.001)
+            beta = params.get('beta', 20.0) 
+            gamma = params.get('gamma', 1.5)
+            
+            # Training loop
+            model.train()
+            best_cut_loss = float('inf')
+            best_balance_loss = float('inf')
+            epochs_without_improvement = 0
+            early_stop_patience = 15
+            
+            cut_losses_history = []
+            balance_losses_history = []
+            
+            for epoch in range(max_epochs):
+                epoch_losses = []
+                epoch_cut_losses = []
+                epoch_balance_losses = []
+                epoch_kl_losses = []
+                
+                for batch_idx, data in enumerate(dataloader):
+                    data = data.to(device)
+                    optimizer.zero_grad()
+                    
+                    try:
+                        Y = model(data)
+                        num_nodes = data.x.shape[0]
+                        num_nets = data.hyperedge_index[1][-1].item() + 1
+                        
+                        # Build sparse incidence matrix
+                        W = torch.sparse_coo_tensor(
+                            data.hyperedge_index, 
+                            torch.ones(data.hyperedge_index.shape[1]).to(device), 
+                            (num_nodes, num_nets)
+                        ).to(device)
+                        
+                        # Node degrees  
+                        D = torch.sparse.sum(W, dim=1).to_dense().unsqueeze(1)
+                        
+                        # Calculate losses
+                        loss, kl_loss, cut_loss, balance_loss = model.combined_loss(
+                            Y, W, D, alpha=alpha, beta=beta, gamma=gamma
+                        )
+                        
+                        if not torch.isnan(loss):
+                            loss.backward()
+                            
+                            # Gradient clipping
+                            if 'gradient_clip' in params:
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), params['gradient_clip'])
+                            
+                            optimizer.step()
+                            
+                            # Record losses
+                            epoch_losses.append(loss.item())
+                            epoch_cut_losses.append(cut_loss.item())
+                            epoch_balance_losses.append(balance_loss.item()) 
+                            epoch_kl_losses.append(kl_loss.item())
+                        
+                        # Early pruning for Optuna
+                        if trial and batch_idx > 5:  # After a few batches
+                            avg_cut = np.mean(epoch_cut_losses)
+                            if avg_cut > 0.2:  # Poor performance
+                                trial.report(avg_cut, epoch)
+                                if trial.should_prune():
+                                    raise optuna.TrialPruned()
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Batch {batch_idx} failed in epoch {epoch}: {e}")
+                        continue
+                
+                # Calculate epoch metrics
+                if epoch_losses:
+                    avg_loss = np.mean(epoch_losses)
+                    avg_cut_loss = np.mean(epoch_cut_losses)
+                    avg_balance_loss = np.mean(epoch_balance_losses)
+                    
+                    cut_losses_history.append(avg_cut_loss)
+                    balance_losses_history.append(avg_balance_loss)
+                    
+                    # Learning rate scheduling
+                    scheduler.step(avg_loss)
+                    
+                    # Track best losses
+                    improved = False
+                    if avg_cut_loss < best_cut_loss:
+                        best_cut_loss = avg_cut_loss
+                        improved = True
+                    if avg_balance_loss < best_balance_loss:
+                        best_balance_loss = avg_balance_loss
+                        improved = True
+                    
+                    if improved:
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
+                    
+                    # Report to Optuna for intermediate pruning
+                    if trial:
+                        trial.report(avg_cut_loss, epoch)
+                        if trial.should_prune():
+                            raise optuna.TrialPruned()
+                    
+                    # Early stopping
+                    if epochs_without_improvement >= early_stop_patience:
+                        self.logger.info(f"Early stopping at epoch {epoch+1}")
+                        break
+                        
+                    # Log progress for important epochs
+                    if epoch % max(1, max_epochs // 10) == 0 or epoch == max_epochs - 1:
+                        imbalance_pct = np.sqrt(avg_balance_loss) * 100
+                        self.logger.debug(
+                            f"Epoch {epoch+1}: cut={avg_cut_loss:.4f}, "
+                            f"balance={avg_balance_loss:.6f} ({imbalance_pct:.2f}%), loss={avg_loss:.4f}"
+                        )
+            
+            # Calculate final metrics
+            final_cut_loss = best_cut_loss
+            final_balance_loss = best_balance_loss
+            
+            # Calculate quality and stability scores
+            quality_score = self._calculate_quality_score(cut_losses_history, balance_losses_history)
+            stability_score = self._calculate_stability_score(cut_losses_history, balance_losses_history)
+            
+            return {
+                'final_cut_loss': float(final_cut_loss),
+                'final_balance_loss': float(final_balance_loss),
+                'quality_score': float(quality_score),
+                'stability_score': float(stability_score),
+                'converged_epoch': len(cut_losses_history),
+                'imbalance_pct': float(np.sqrt(final_balance_loss) * 100)
+            }
+            
+        except optuna.TrialPruned:
+            # Re-raise pruning exception
+            raise
+        except Exception as e:
+            self.logger.error(f"Training failed: {str(e)}")
+            # Return poor results for failed training
+            return {
+                'final_cut_loss': 1.0,
+                'final_balance_loss': 1.0,
+                'quality_score': 0.0,
+                'stability_score': 0.0,
+                'converged_epoch': 0,
+                'imbalance_pct': 100.0
+            }
+    
+    def _calculate_quality_score(self, cut_losses: List[float], balance_losses: List[float]) -> float:
+        """Calculate quality score based on loss trajectories"""
+        if not cut_losses or not balance_losses:
+            return 0.0
         
-        # Create dataset with enhanced features
-        dataset = ISPDDataset(self.data_path)
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+        # Quality based on final losses and convergence
+        final_cut = cut_losses[-1]
+        final_balance = balance_losses[-1]
         
-        # Initialize model with parameters
-        model = GraphPartitionModel(
-            input_dim=7,
-            hidden_dim=params.get('hidden_dim', 256),
-            latent_dim=params.get('latent_dim', 64),
-            num_partitions=2,
-            use_hypergraph=True
-        ).to(device)
+        # Score components
+        cut_score = max(0, 1.0 - final_cut / 0.1)  # Good if cut < 0.1
+        balance_score = max(0, 1.0 - final_balance / 0.04)  # Good if balance < 0.04 (2% imbalance)
+        convergence_score = len(cut_losses) / max(50, len(cut_losses))  # Faster convergence is better
         
-        # Setup adaptive loss weighting
-        loss_weighter = AdaptiveLossWeighting(
-            initial_alpha=params.get('alpha', 0.001),
-            initial_beta=params.get('beta', 5.0),
-            initial_gamma=params.get('gamma', 2.0),
-            adaptive=params.get('adaptive_weights', True),
-            annealing=params.get('loss_annealing', True)
-        ).to(device)
+        return np.mean([cut_score, balance_score, convergence_score])
+    
+    def _calculate_stability_score(self, cut_losses: List[float], balance_losses: List[float]) -> float:
+        """Calculate stability score based on loss variance"""
+        if len(cut_losses) < 5 or len(balance_losses) < 5:
+            return 0.0
         
-        # Setup optimizer
-        optimizer = torch.optim.Adam([
-            {'params': model.parameters()},
-            {'params': loss_weighter.parameters(), 'lr': params.get('learning_rate', 5e-5) * 0.1}
-        ], lr=params.get('learning_rate', 5e-5), 
-           weight_decay=params.get('weight_decay', 1e-5))
+        # Look at last 20% of training for stability
+        window = max(5, len(cut_losses) // 5)
+        recent_cut = cut_losses[-window:]
+        recent_balance = balance_losses[-window:]
         
-        # Setup monitoring
-        monitor = ConvergenceMonitor()
-        quality_eval = QualityEvaluator()
+        # Lower variance = higher stability
+        cut_var = np.var(recent_cut)
+        balance_var = np.var(recent_balance)
         
-        # Training loop (simplified)
-        model.train()
-        final_metrics = {
-            'final_cut_loss': 0.5,  # Placeholder
-            'final_balance_loss': 0.01,  # Placeholder  
-            'quality_score': 0.7,  # Placeholder
-            'stability_score': 0.8,  # Placeholder
-        }
+        cut_stability = 1.0 / (1.0 + cut_var * 100)  # Normalized stability
+        balance_stability = 1.0 / (1.0 + balance_var * 1000)
         
-        return final_metrics
+        return np.mean([cut_stability, balance_stability])
     
     def _analyze_results(self) -> Dict:
         """Analyze optimization results and find best configurations"""
@@ -368,9 +547,14 @@ class MultiObjectiveOptimizer:
             if trial.state == optuna.trial.TrialState.COMPLETE:
                 cut_loss, balance_loss, neg_quality, neg_stability = trial.values
                 
-                # Best cut loss
+                # Best cut loss (primary objective)
                 if analysis['best_cut_loss'] is None or cut_loss < analysis['best_cut_loss']['cut_loss']:
-                    analysis['best_cut_loss'] = {'params': trial.params, 'cut_loss': cut_loss}
+                    analysis['best_cut_loss'] = {
+                        'params': trial.params, 
+                        'cut_loss': cut_loss,
+                        'balance_loss': balance_loss,
+                        'imbalance_pct': torch.sqrt(torch.tensor(balance_loss)).item() * 100
+                    }
                 
                 # Best balance loss  
                 if analysis['best_balance_loss'] is None or balance_loss < analysis['best_balance_loss']['balance_loss']:

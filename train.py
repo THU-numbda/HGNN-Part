@@ -31,9 +31,9 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', type=float, default=5e-5)
-    parser.add_argument('--alpha', type=float, default=0.0005)
-    parser.add_argument('--beta', type=float, default=5)
-    parser.add_argument('--gamma', type=float, default=1)
+    parser.add_argument('--alpha', type=float, default=0.001)  # KL regularization
+    parser.add_argument('--beta', type=float, default=20)     # Cut loss priority
+    parser.add_argument('--gamma', type=float, default=1.5)   # Balance constraint
     parser.add_argument('--epochs', type=int, default=50)
     args = parser.parse_args()
     dataset = ISPDDataset('/data1/tongsb/GraphPart/dataset/pt/train')
