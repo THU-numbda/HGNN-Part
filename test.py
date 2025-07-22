@@ -7,6 +7,9 @@ from transformers import set_seed
 from utils import *
 from models import GraphPartitionModel
 
+# Ensure models directory exists
+os.makedirs('./models', exist_ok=True)
+
 if __name__ == '__main__':
     torch.cuda.set_device(0)
     set_seed(42)

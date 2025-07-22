@@ -112,13 +112,16 @@ def preprocess_data(hypergraph_vertices, hypergraph_edges, filename, num_nodes, 
     partition_feature = create_partition_id_feature(len(hypergraph_vertices), filename)
     features = np.column_stack([clique_topo_features, star_topo_features, node_degree, pin_count, partition_feature])
     del adj_matrix, node_degree, pin_count, clique_topo_features, star_topo_features, H, U, S, Vt
+    # Safe feature normalization with numerical stability
     deg_feature_norm = np.linalg.norm(features[:, 4])
-    features[:, 0] = features[:, 0] / np.linalg.norm(features[:, 0]) * deg_feature_norm
-    features[:, 1] = features[:, 1] / np.linalg.norm(features[:, 1]) * deg_feature_norm
-    features[:, 2] = features[:, 2] / np.linalg.norm(features[:, 2]) * deg_feature_norm
-    features[:, 3] = features[:, 3] / np.linalg.norm(features[:, 3]) * deg_feature_norm
-    features[:, 5] = features[:, 5] / np.linalg.norm(features[:, 5]) * deg_feature_norm
-    features[:, 6] = features[:, 6] / np.linalg.norm(features[:, 6]) * deg_feature_norm
+    eps = 1e-8  # Small epsilon to prevent division by zero
+    
+    for i in [0, 1, 2, 3, 5, 6]:
+        feature_norm = np.linalg.norm(features[:, i])
+        if feature_norm > eps:  # Only normalize if norm is significant
+            features[:, i] = features[:, i] / feature_norm * deg_feature_norm
+        else:
+            features[:, i] = 0.0  # Set to zero if norm is too small
     hyperedge_index = torch.tensor(np.array([
         np.concatenate(hypergraph_edges),
         np.repeat(np.arange(len(hypergraph_edges)), [len(e) for e in hypergraph_edges])

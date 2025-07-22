@@ -85,7 +85,7 @@ class VariationalEncoder(nn.Module):
     def forward(self, data: Union[Data, HyperData]):
         x = data.x if isinstance(data, Data) else data.x
         edge_index = data.hyperedge_index if isinstance(data, HyperData) else data.edge_index
-        # x = F.dropout(x, p=0.2, training=self.training)
+        x = F.dropout(x, p=0.1, training=self.training)  # Add input dropout
         x_clone = x.clone()
         if self.training:
             num_nodes = x_clone.size(0)
@@ -123,13 +123,15 @@ class GraphPartitionModel(VGAE):
 
     def normalized_cut_loss(self, Y: torch.Tensor, W: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
         ncut = torch.tensor(0.0, device=Y.device)
+        eps = 1e-8  # Small epsilon to prevent division by zero
         for g in range(self.num_partitions):
             Y_g = Y[:, g]
             indices = W._indices()
             values = W._values()
             row, col = indices[0, :], indices[1, :]
             cut_values = Y_g[row] * (1 - Y_g[col]) * values
-            ncut += cut_values.sum() / (Y_g @ D).sum()
+            partition_volume = (Y_g @ D).sum()
+            ncut += cut_values.sum() / torch.clamp(partition_volume, min=eps)
         return ncut
     
     def hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
@@ -150,7 +152,8 @@ class GraphPartitionModel(VGAE):
     def normalized_hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
         cut_loss = self.hyperedge_cut_loss(Y, W)
         partition_degrees = (D * Y).sum(dim=0)
-        return cut_loss * torch.sum(partition_degrees.pow(-1))
+        eps = 1e-8  # Small epsilon to prevent division by zero
+        return cut_loss * torch.sum(torch.pow(torch.clamp(partition_degrees, min=eps), -1))
     
     def combined_loss(self, Y, W, D, alpha=0.0005, beta=5, gamma=1):
         kl_loss = self.kl_loss()
@@ -171,16 +174,21 @@ class GraphPartitionModel(VGAE):
         return loss, kl_loss, ncut_loss, balance_loss_val
 
     def forward(self, data: Data):
+        if data.x is None or data.x.size(0) == 0:
+            raise ValueError("Invalid input: empty or None node features")
         z = self.encode(data)
         Y = self.decode(z)
         return Y
     
     def sample(self, data: Data, m=1):
+        if data.x is None or data.x.size(0) == 0:
+            raise ValueError("Invalid input: empty or None node features")
         mu, logstd = self.encoder(data)
-        logstd = torch.clamp(logstd, max=10)
+        logstd = torch.clamp(logstd, min=-10, max=10)  # Clamp both sides for stability
         samples = []
         for _ in range(m):
-            z = mu + torch.randn_like(logstd, device=data.x.device) * torch.exp(logstd)
+            eps = torch.randn_like(logstd, device=data.x.device)
+            z = mu + eps * torch.exp(logstd)
             Y = self.decode(z)
             partition = torch.argmax(Y, dim=-1)
             samples.append(partition.cpu().numpy())

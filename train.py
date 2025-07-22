@@ -8,6 +8,9 @@ import argparse
 import gc
 from models import GraphPartitionModel, HyperData
 
+# Ensure models directory exists
+os.makedirs('./models', exist_ok=True)
+
 class ISPDDataset(Dataset):
     def __init__(self, root):
         super().__init__(root)
@@ -42,7 +45,14 @@ if __name__ == '__main__':
     num_epochs = args.epochs
     model = GraphPartitionModel(input_dim, hidden_dim, latent_dim, num_partitions, True)
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)  # Add weight decay
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    
+    # Early stopping variables
+    best_loss = float('inf')
+    patience_counter = 0
+    patience = 10
+    
     model.train()
     for epoch in range(num_epochs):
         losses, kl_losses, hyperedge_cut_losses, balance_losses = [], [], [], []
@@ -57,21 +67,39 @@ if __name__ == '__main__':
             loss, kl_loss, hyperedge_cut_loss, balance_loss = model.combined_loss(Y, W, D, alpha=args.alpha, beta=args.beta, gamma=args.gamma)
             if not loss.isnan():
                 loss.backward()
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), 3)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Enable gradient clipping
                 optimizer.step()
                 losses.append(loss.item())
                 kl_losses.append(kl_loss.item())
                 hyperedge_cut_losses.append(hyperedge_cut_loss.item())
                 balance_losses.append(balance_loss.item())
             else:
-                print('Loss is NaN!')
-            del data, W, Y, D, loss, kl_loss, hyperedge_cut_loss, balance_loss
-            torch.cuda.empty_cache()
-            gc.collect()
+                print(f'Loss is NaN at epoch {epoch + 1}! Skipping this batch.')
+            # More efficient memory management - only clean up heavy objects
+            del W, Y, D
+            if 'loss' in locals():
+                del loss, kl_loss, hyperedge_cut_loss, balance_loss
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         peak_memory_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-        print(f'Epoch {epoch + 1}, Loss: {np.mean(losses):.4e}, KL Loss: {np.mean(kl_losses):.4e}, Ncut Loss: {np.mean(hyperedge_cut_losses):.4e}, Balance Loss: {np.mean(balance_losses):.4e}, Peak Memory: {peak_memory_gb:.2f} GB')
-        # if np.mean(hyperedge_cut_losses) < min_ncut_loss:
-        #     min_ncut_loss = np.mean(hyperedge_cut_losses)
-        #     torch.save(model.state_dict(), './models/model.best.pt')
+        epoch_loss = np.mean(losses) if losses else float('inf')
+        print(f'Epoch {epoch + 1}, Loss: {epoch_loss:.4e}, KL Loss: {np.mean(kl_losses):.4e}, Ncut Loss: {np.mean(hyperedge_cut_losses):.4e}, Balance Loss: {np.mean(balance_losses):.4e}, Peak Memory: {peak_memory_gb:.2f} GB')
+        
+        # Learning rate scheduling
+        scheduler.step(epoch_loss)
+        
+        # Early stopping and best model saving
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), './models/model.best.pt')
+            print(f'New best model saved at epoch {epoch + 1}')
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= patience:
+            print(f'Early stopping triggered at epoch {epoch + 1}')
+            break
+            
     torch.save(model.state_dict(), f'./models/model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
-    print(f'Model saved as model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
+    print(f'Final model saved as model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
