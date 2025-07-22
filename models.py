@@ -93,10 +93,10 @@ class VariationalEncoder(nn.Module):
             perm = torch.randperm(num_nodes, device=x_clone.device)
             masked_indices = perm[:num_mask]
             x_clone[masked_indices] = self.mask_token.to(x.dtype)
-        x1 = self.ln1(F.relu(self.conv1(x_clone, edge_index)))
-        x2 = self.ln2(F.relu(self.conv2(x1, edge_index)))
-        x3 = self.ln3(F.relu(self.fc(x1 + x2)))
-        x4 = self.ln4(F.relu(self.conv3(x3, edge_index)))
+        x1 = F.relu(self.ln1(self.conv1(x_clone, edge_index)))
+        x2 = F.relu(self.ln2(self.conv2(x1, edge_index)))
+        x3 = F.relu(self.ln3(self.fc(x1 + x2)))
+        x4 = F.relu(self.ln4(self.conv3(x3, edge_index)))
         mu = self.fc_mu(x4, edge_index)
         logstd = self.fc_logstd(x4, edge_index)
         return mu, logstd
@@ -116,7 +116,7 @@ class PartitionDecoder(nn.Module):
 
 class GraphPartitionModel(VGAE):
     def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, num_partitions=2, use_hypergraph=False):
-        super().__init__(OldVariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
+        super().__init__(VariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
         self.num_partitions = num_partitions
         self.log_vars = nn.Parameter(torch.zeros(3))
         self.use_hypergraph = use_hypergraph
