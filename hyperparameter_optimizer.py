@@ -258,7 +258,7 @@ class MultiObjectiveOptimizer:
         
         return params
     
-    def _objective_function(self, trial, params: Dict, max_epochs: int = 200, 
+    def _objective_function(self, trial, params: Dict, max_epochs: int = 500, 
                           final_validation: bool = False) -> Tuple[float, float, float, float]:
         """
         Objective function prioritizing cut loss minimization with balance constraint
@@ -276,16 +276,16 @@ class MultiObjectiveOptimizer:
             
             # Convert balance loss to imbalance percentage (approximation)
             # balance_loss is squared relative error, so imbalance ≈ sqrt(balance_loss)
-            imbalance_pct = torch.sqrt(torch.tensor(balance_loss)).item() * 100
+            imbalance_pct = torch.sqrt(torch.tensor(balance_loss) / 2.0).item() * 100.0
             
-            # Apply penalty if balance constraint is violated (>2% imbalance)
+            # Apply penalty if balance constraint is violated (>4% imbalance)
             balance_penalty = balance_loss
-            if imbalance_pct > 2.0:
+            if imbalance_pct > 4.0:
                 # Heavy penalty for constraint violation
-                balance_penalty = balance_loss * 10.0 + (imbalance_pct - 2.0) ** 2
-            
+                balance_penalty = balance_loss * 10.0 + (imbalance_pct - 4.0) ** 2
+
             # Early pruning if cut loss too high or severe imbalance
-            if not final_validation and (cut_loss > 0.1 or imbalance_pct > 5.0) and trial.number > 10:
+            if not final_validation and (cut_loss > 0.025 or imbalance_pct > 10.0) and trial.number > 10:
                 raise optuna.TrialPruned()
             
             # Log trial results with imbalance percentage
@@ -402,12 +402,12 @@ class MultiObjectiveOptimizer:
                             epoch_kl_losses.append(kl_loss.item())
                         
                         # Early pruning for Optuna
-                        if trial and batch_idx > 5:  # After a few batches
-                            avg_cut = np.mean(epoch_cut_losses)
-                            if avg_cut > 0.2:  # Poor performance
-                                trial.report(avg_cut, epoch)
-                                if trial.should_prune():
-                                    raise optuna.TrialPruned()
+                        # if trial and batch_idx > 5:  # After a few batches
+                        #     avg_cut = np.mean(epoch_cut_losses)
+                        #     if avg_cut > 0.6:  # Poor performance
+                        #         trial.report(avg_cut, epoch)
+                        #         if trial.should_prune():
+                        #             raise optuna.TrialPruned()
                         
                     except Exception as e:
                         self.logger.warning(f"Batch {batch_idx} failed in epoch {epoch}: {e}")
@@ -429,8 +429,6 @@ class MultiObjectiveOptimizer:
                     improved = False
                     if avg_cut_loss < best_cut_loss:
                         best_cut_loss = avg_cut_loss
-                        improved = True
-                    if avg_balance_loss < best_balance_loss:
                         best_balance_loss = avg_balance_loss
                         improved = True
                     
@@ -440,10 +438,10 @@ class MultiObjectiveOptimizer:
                         epochs_without_improvement += 1
                     
                     # Report to Optuna for intermediate pruning
-                    if trial:
-                        trial.report(avg_cut_loss, epoch)
-                        if trial.should_prune():
-                            raise optuna.TrialPruned()
+                    # if trial:
+                    #     trial.report(avg_cut_loss, epoch)
+                    #     if trial.should_prune():
+                    #         raise optuna.TrialPruned()
                     
                     # Early stopping
                     if epochs_without_improvement >= early_stop_patience:
@@ -500,8 +498,8 @@ class MultiObjectiveOptimizer:
         final_balance = balance_losses[-1]
         
         # Score components
-        cut_score = max(0, 1.0 - final_cut / 0.1)  # Good if cut < 0.1
-        balance_score = max(0, 1.0 - final_balance / 0.04)  # Good if balance < 0.04 (2% imbalance)
+        cut_score = max(0, 1.0 - final_cut / 0.025)  # Good if cut < 0.025
+        balance_score = max(0, 1.0 - final_balance / 0.001)  # Good if balance < 0.001 (2% imbalance)
         convergence_score = len(cut_losses) / max(50, len(cut_losses))  # Faster convergence is better
         
         return np.mean([cut_score, balance_score, convergence_score])
@@ -615,7 +613,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="GraphPart Hyperparameter Optimization")
-    parser.add_argument('--data-path', type=str, required=True, help='Path to training data')
+    parser.add_argument('--data-path', type=str, default='/data1/tongsb/GraphPart/dataset/pt/train', help='Path to training data')
     parser.add_argument('--output-dir', type=str, default='./hyperopt_results', help='Output directory')
     parser.add_argument('--n-trials', type=int, default=200, help='Number of optimization trials')
     parser.add_argument('--n-parallel', type=int, default=4, help='Number of parallel workers')
