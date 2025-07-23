@@ -162,8 +162,8 @@ class MultiObjectiveOptimizer:
         params['mask_rate'] = trial.suggest_uniform('mask_rate', 0.1, 0.3)
         
         # Normalization
-        params['norm_method'] = trial.suggest_categorical('norm_method', 
-            [NormalizationMethod.STANDARD, NormalizationMethod.ROBUST, NormalizationMethod.UNIT_NORM])
+        # params['norm_method'] = trial.suggest_categorical('norm_method', 
+        #     [NormalizationMethod.STANDARD, NormalizationMethod.ROBUST, NormalizationMethod.UNIT_NORM])
         
         return params
     
@@ -203,7 +203,8 @@ class MultiObjectiveOptimizer:
         # Very small variations for final validation
         if 'learning_rate' in best_params:
             base_lr = best_params['learning_rate']
-            params['learning_rate'] = trial.suggest_uniform('learning_rate',
+            # Use loguniform to be consistent with other stages
+            params['learning_rate'] = trial.suggest_loguniform('learning_rate',
                 base_lr * 0.8, base_lr * 1.2)
         
         # Add ensemble parameters
@@ -238,9 +239,9 @@ class MultiObjectiveOptimizer:
         params['loss_annealing'] = trial.suggest_categorical('loss_annealing', [True, False])
         
         # Feature normalization
-        params['norm_method'] = trial.suggest_categorical('norm_method', list(NormalizationMethod))
-        params['feature_scaling'] = trial.suggest_uniform('feature_scaling', 0.7, 1.5)
-        params['spectral_norm'] = trial.suggest_categorical('spectral_norm', [True, False])
+        # params['norm_method'] = trial.suggest_categorical('norm_method', list(NormalizationMethod))
+        # params['feature_scaling'] = trial.suggest_uniform('feature_scaling', 0.7, 1.5)
+        # params['spectral_norm'] = trial.suggest_categorical('spectral_norm', [True, False])
         
         # Optimization
         params['scheduler_type'] = trial.suggest_categorical('scheduler_type', 
