@@ -5,17 +5,13 @@ import optuna
 import numpy as np
 import torch
 import json
-import time
 import warnings
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Tuple
 from pathlib import Path
 import pickle
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing as mp
 
 from hyperopt_config import HyperOptConfig, NormalizationMethod
-from convergence_monitor import ConvergenceMonitor, AdaptiveLossWeighting, EarlyStoppingManager
-from feature_normalizer import create_enhanced_features
 from logger import setup_logger
 
 # Suppress warnings for cleaner output
@@ -33,7 +29,6 @@ class MultiObjectiveOptimizer:
         self.n_parallel = min(n_parallel, mp.cpu_count())
         
         self.logger = setup_logger('hyperopt', str(self.output_dir / 'logs'))
-        self.best_trials = []
         self.config = HyperOptConfig()
         
         # Initialize Optuna study with cut loss priority
@@ -84,22 +79,17 @@ class MultiObjectiveOptimizer:
     
     def _run_coarse_search(self, n_trials: int) -> Dict:
         """Run coarse-grained parameter search"""
-        # Use broader search ranges for coarse search
-        coarse_study = optuna.create_study(
-            directions=['minimize', 'minimize', 'maximize', 'maximize'],
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
-        )
-        
         def coarse_objective(trial):
             params = self._sample_coarse_parameters(trial)
             return self._objective_function(trial, params, max_epochs=100)
         
-        coarse_study.optimize(coarse_objective, n_trials=n_trials, n_jobs=self.n_parallel)
+        # Use self.study directly instead of creating separate study
+        self.study.optimize(coarse_objective, n_trials=n_trials, n_jobs=self.n_parallel)
         
         return {
-            'n_trials': len(coarse_study.trials),
-            'best_trials': coarse_study.best_trials[:5],  # Top 5 trials
-            'study': coarse_study
+            'n_trials': len(self.study.trials),
+            'best_trials': self.study.best_trials[:5],  # Top 5 trials
+            'study': self.study
         }
     
     def _run_fine_tuning(self, n_trials: int) -> Dict:
@@ -107,35 +97,29 @@ class MultiObjectiveOptimizer:
         # Get best parameters from coarse search for fine-tuning
         best_trials = self.study.best_trials[:3] if self.study.best_trials else []
         
-        fine_study = optuna.create_study(
-            directions=['minimize', 'minimize', 'maximize', 'maximize'],
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=15)
-        )
-        
         def fine_objective(trial):
             if best_trials:
-                # Sample around best configurations
-                base_params = best_trials[trial.number % len(best_trials)].params
+                # Sample around best configurations  
+                # Use current trial index relative to current optimization stage
+                base_idx = len(self.study.trials) % len(best_trials)
+                base_params = best_trials[base_idx].params
                 params = self._sample_fine_parameters(trial, base_params)
             else:
                 params = self._sample_parameters(trial)
             return self._objective_function(trial, params, max_epochs=200)
         
-        fine_study.optimize(fine_objective, n_trials=n_trials, n_jobs=self.n_parallel)
+        # Continue using self.study
+        current_trial_count = len(self.study.trials)
+        self.study.optimize(fine_objective, n_trials=n_trials, n_jobs=self.n_parallel)
         
         return {
-            'n_trials': len(fine_study.trials),
-            'best_trials': fine_study.best_trials[:3],
-            'study': fine_study
+            'n_trials': len(self.study.trials) - current_trial_count,
+            'best_trials': self.study.best_trials[:3],
+            'study': self.study
         }
     
     def _run_final_validation(self, n_trials: int) -> Dict:
         """Final validation with extended training"""
-        final_study = optuna.create_study(
-            directions=['minimize', 'minimize', 'maximize', 'maximize'],
-            pruner=None  # No pruning in final validation
-        )
-        
         def final_objective(trial):
             # Use only the very best parameter combinations
             if self.study.best_trials:
@@ -145,12 +129,21 @@ class MultiObjectiveOptimizer:
                 params = self._sample_parameters(trial)
             return self._objective_function(trial, params, max_epochs=300, final_validation=True)
         
-        final_study.optimize(final_objective, n_trials=min(n_trials, 20), n_jobs=min(2, self.n_parallel))
+        # Continue using self.study, but disable pruning for final validation
+        # Temporarily disable pruner
+        original_pruner = self.study.pruner
+        self.study.pruner = None
+        
+        current_trial_count = len(self.study.trials)
+        self.study.optimize(final_objective, n_trials=min(n_trials, 20), n_jobs=min(2, self.n_parallel))
+        
+        # Restore original pruner
+        self.study.pruner = original_pruner
         
         return {
-            'n_trials': len(final_study.trials),
-            'best_trials': final_study.best_trials,
-            'study': final_study
+            'n_trials': len(self.study.trials) - current_trial_count,
+            'best_trials': self.study.best_trials,
+            'study': self.study
         }
     
     def _sample_coarse_parameters(self, trial) -> Dict[str, Any]:
@@ -267,7 +260,7 @@ class MultiObjectiveOptimizer:
         """
         try:
             # Train model with given parameters
-            results = self._train_with_params(params, max_epochs, trial, final_validation)
+            results = self._train_with_params(params, max_epochs)
             
             cut_loss = results['final_cut_loss']
             balance_loss = results['final_balance_loss']
@@ -296,14 +289,12 @@ class MultiObjectiveOptimizer:
             return cut_loss, balance_penalty, -quality_score, -stability_score
             
         except Exception as e:
-            self.logger.error(f"Trial {trial.number} failed: {str(e)}")
+            self.logger.error(f"Trial failed: {str(e)}")
             # Return worst possible values for failed trials
             return 1.0, 1.0, -0.0, -0.0
     
-    def _train_with_params(self, params: Dict, max_epochs: int, trial, 
-                          final_validation: bool = False) -> Dict:
+    def _train_with_params(self, params: Dict, max_epochs: int) -> Dict:
         """Train model with given parameters and return real metrics"""
-        import torch.nn.functional as F
         import numpy as np
         
         # Import necessary modules
@@ -543,7 +534,7 @@ class MultiObjectiveOptimizer:
         # Find specialized best configurations
         for trial in self.study.trials:
             if trial.state == optuna.trial.TrialState.COMPLETE:
-                cut_loss, balance_loss, neg_quality, neg_stability = trial.values
+                cut_loss, balance_loss, neg_quality, _ = trial.values
                 
                 # Best cut loss (primary objective)
                 if analysis['best_cut_loss'] is None or cut_loss < analysis['best_cut_loss']['cut_loss']:
