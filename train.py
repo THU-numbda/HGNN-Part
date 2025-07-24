@@ -7,6 +7,7 @@ import os
 import argparse
 import gc
 from models import GraphPartitionModel, HyperData
+import swanlab
 
 # Ensure models directory exists
 os.makedirs('./models', exist_ok=True)
@@ -36,6 +37,26 @@ if __name__ == '__main__':
     parser.add_argument('--gamma', type=float, default=1.5)   # Balance constraint
     parser.add_argument('--epochs', type=int, default=50)
     args = parser.parse_args()
+    
+    # Initialize SwanLab
+    swanlab.init(
+        project="GraphPart",
+        experiment_name=f"vgae_lr{args.lr}_a{args.alpha}_b{args.beta}_g{args.gamma}",
+        config={
+            "learning_rate": args.lr,
+            "alpha": args.alpha,
+            "beta": args.beta,  
+            "gamma": args.gamma,
+            "epochs": args.epochs,
+            "input_dim": 7,
+            "latent_dim": 64,
+            "hidden_dim": 256,
+            "num_partitions": 2,
+            "batch_size": 1,
+            "weight_decay": 1e-5,
+            "patience": 10
+        }
+    )
     dataset = ISPDDataset('/data1/tongsb/GraphPart/dataset/pt/train')
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
     input_dim = 7
@@ -83,7 +104,24 @@ if __name__ == '__main__':
                 torch.cuda.empty_cache()
         peak_memory_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
         epoch_loss = np.mean(losses) if losses else float('inf')
-        print(f'Epoch {epoch + 1}, Loss: {epoch_loss:.4e}, KL Loss: {np.mean(kl_losses):.4e}, Ncut Loss: {np.mean(hyperedge_cut_losses):.4e}, Balance Loss: {np.mean(balance_losses):.4e}, Peak Memory: {peak_memory_gb:.2f} GB')
+        epoch_kl_loss = np.mean(kl_losses) if kl_losses else 0.0
+        epoch_cut_loss = np.mean(hyperedge_cut_losses) if hyperedge_cut_losses else 0.0
+        epoch_balance_loss = np.mean(balance_losses) if balance_losses else 0.0
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Log metrics to SwanLab
+        swanlab.log({
+            "epoch": epoch + 1,
+            "train/total_loss": epoch_loss,
+            "train/kl_loss": epoch_kl_loss,
+            "train/cut_loss": epoch_cut_loss,
+            "train/balance_loss": epoch_balance_loss,
+            "train/learning_rate": current_lr,
+            "system/peak_memory_gb": peak_memory_gb,
+            "system/batches_processed": len(losses)
+        })
+        
+        print(f'Epoch {epoch + 1}, Loss: {epoch_loss:.4e}, KL Loss: {epoch_kl_loss:.4e}, Ncut Loss: {epoch_cut_loss:.4e}, Balance Loss: {epoch_balance_loss:.4e}, Peak Memory: {peak_memory_gb:.2f} GB')
         
         # Learning rate scheduling
         scheduler.step(epoch_loss)
@@ -93,13 +131,31 @@ if __name__ == '__main__':
             best_loss = epoch_loss
             patience_counter = 0
             torch.save(model.state_dict(), './models/model.best.pt')
+            # Log best model metrics to SwanLab
+            swanlab.log({
+                "train/best_loss": best_loss,
+                "train/best_epoch": epoch + 1
+            })
             print(f'New best model saved at epoch {epoch + 1}')
         else:
             patience_counter += 1
             
         if patience_counter >= patience:
+            swanlab.log({"train/early_stopped": True, "train/final_epoch": epoch + 1})
             print(f'Early stopping triggered at epoch {epoch + 1}')
             break
             
-    torch.save(model.state_dict(), f'./models/model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
+    # Save final model
+    final_model_path = f'./models/model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt'
+    torch.save(model.state_dict(), final_model_path)
+    
+    # Log final training summary
+    swanlab.log({
+        "train/final_best_loss": best_loss,
+        "train/total_epochs_completed": epoch + 1
+    })
+    
     print(f'Final model saved as model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
+    
+    # Finish SwanLab run
+    swanlab.finish()

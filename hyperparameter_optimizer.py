@@ -11,6 +11,7 @@ from pathlib import Path
 import pickle
 import pandas as pd
 import multiprocessing as mp
+import swanlab
 
 from hyperopt_config import HyperOptConfig, NormalizationMethod
 from logger import setup_logger
@@ -31,6 +32,19 @@ class MultiObjectiveOptimizer:
         
         self.logger = setup_logger('hyperopt', str(self.output_dir / 'logs'))
         self.config = HyperOptConfig()
+        
+        # Initialize SwanLab for hyperparameter optimization tracking
+        self.swanlab_run = swanlab.init(
+            project="GraphPart",
+            experiment_name=f"multi_objective_opt_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}",
+            config={
+                "data_path": data_path,
+                "n_trials": n_trials,
+                "n_parallel": n_parallel,
+                "optimization_strategy": "multi_stage",
+                "objectives": ["cut_loss", "balance_penalty", "quality_score", "stability_score"]
+            }
+        )
         
         # Initialize Optuna study with cut loss priority
         storage_url = f"sqlite:///{self.output_dir}/optuna_study.db"
@@ -298,6 +312,31 @@ class MultiObjectiveOptimizer:
             if not final_validation and (cut_loss > 0.025 or imbalance_pct > 10.0) and trial.number > 10:
                 raise optuna.TrialPruned()
             
+            # Log trial results to SwanLab
+            trial_data = {
+                f"hyperopt/trial_{trial.number}/cut_loss": cut_loss,
+                f"hyperopt/trial_{trial.number}/balance_loss": balance_loss,
+                f"hyperopt/trial_{trial.number}/balance_penalty": balance_penalty,
+                f"hyperopt/trial_{trial.number}/imbalance_pct": imbalance_pct,
+                f"hyperopt/trial_{trial.number}/quality_score": quality_score,
+                f"hyperopt/trial_{trial.number}/stability_score": stability_score,
+                f"hyperopt/trial_{trial.number}/converged_epoch": results.get('converged_epoch', 0),
+                
+                # Log hyperparameters
+                f"hyperopt/trial_{trial.number}/learning_rate": params.get('learning_rate', 0),
+                f"hyperopt/trial_{trial.number}/alpha": params.get('alpha', 0),
+                f"hyperopt/trial_{trial.number}/beta": params.get('beta', 0),
+                f"hyperopt/trial_{trial.number}/gamma": params.get('gamma', 0),
+                f"hyperopt/trial_{trial.number}/hidden_dim": params.get('hidden_dim', 0),
+                f"hyperopt/trial_{trial.number}/latent_dim": params.get('latent_dim', 0),
+                
+                # Summary metrics for comparison
+                "hyperopt/current_best_cut": cut_loss,
+                "hyperopt/current_best_balance": balance_loss,
+                "hyperopt/trials_completed": trial.number + 1
+            }
+            swanlab.log(trial_data)
+            
             # Log trial results with imbalance percentage
             self.logger.info(f"Trial {trial.number}: cut={cut_loss:.4f}, balance={balance_loss:.6f}, "
                            f"imbalance={imbalance_pct:.2f}%, quality={quality_score:.3f}, stability={stability_score:.3f}")
@@ -308,6 +347,10 @@ class MultiObjectiveOptimizer:
         except Exception as e:
             self.logger.error(f"Trial failed: {str(e)}")
             # Return worst possible values for failed trials
+            swanlab.log({
+                f"hyperopt/trial_{trial.number}/failed": True,
+                f"hyperopt/trial_{trial.number}/error": str(e)
+            })
             return 1.0, 1.0, -0.0, -0.0
     
     def _train_with_params(self, params: Dict, max_epochs: int) -> Dict:
@@ -723,10 +766,16 @@ class MultiObjectiveOptimizer:
             }
         }
         
+        # Track best configurations for SwanLab logging
+        best_cut_loss = float('inf')
+        best_balance_loss = float('inf')
+        best_quality = -float('inf')
+        
         # Find specialized best configurations
         for trial in self.study.trials:
             if trial.state == optuna.trial.TrialState.COMPLETE:
                 cut_loss, balance_loss, neg_quality, _ = trial.values
+                quality = -neg_quality
                 
                 # Best cut loss (primary objective)
                 if analysis['best_cut_loss'] is None or cut_loss < analysis['best_cut_loss']['cut_loss']:
@@ -737,6 +786,9 @@ class MultiObjectiveOptimizer:
                         'imbalance_pct': torch.sqrt(torch.tensor(balance_loss)).item() * 100,
                         'trial_id': trial.number
                     }
+                    
+                    if cut_loss < best_cut_loss:
+                        best_cut_loss = cut_loss
                 
                 # Best balance loss  
                 if analysis['best_balance_loss'] is None or balance_loss < analysis['best_balance_loss']['balance_loss']:
@@ -745,20 +797,50 @@ class MultiObjectiveOptimizer:
                         'balance_loss': balance_loss,
                         'trial_id': trial.number
                     }
+                    
+                    if balance_loss < best_balance_loss:
+                        best_balance_loss = balance_loss
                 
                 # Best quality
-                quality = -neg_quality
                 if analysis['best_quality'] is None or quality > analysis['best_quality']['quality']:
                     analysis['best_quality'] = {
                         'params': trial.params, 
                         'quality': quality,
                         'trial_id': trial.number
                     }
+                    
+                    if quality > best_quality:
+                        best_quality = quality
+        
+        # Log best configurations to SwanLab
+        if analysis['best_cut_loss']:
+            swanlab.log({
+                "hyperopt/final/best_cut_loss": best_cut_loss,
+                "hyperopt/final/best_cut_trial_id": analysis['best_cut_loss']['trial_id'],
+                "hyperopt/final/best_cut_imbalance_pct": analysis['best_cut_loss']['imbalance_pct']
+            })
+        
+        if analysis['best_balance_loss']:
+            swanlab.log({
+                "hyperopt/final/best_balance_loss": best_balance_loss,
+                "hyperopt/final/best_balance_trial_id": analysis['best_balance_loss']['trial_id']
+            })
+        
+        if analysis['best_quality']:
+            swanlab.log({
+                "hyperopt/final/best_quality_score": best_quality,
+                "hyperopt/final/best_quality_trial_id": analysis['best_quality']['trial_id']
+            })
         
         # Parameter importance analysis
         try:
             importance = optuna.importance.get_param_importances(self.study)
             analysis['parameter_importance'] = importance
+            
+            # Log parameter importance to SwanLab
+            for param, imp in importance.items():
+                swanlab.log({f"hyperopt/param_importance/{param}": imp})
+                
         except Exception as e:
             self.logger.warning(f"Could not compute parameter importance: {e}")
             pass
@@ -837,6 +919,25 @@ class MultiObjectiveOptimizer:
                 with open(self.output_dir / 'best_config_complete_with_metadata.json', 'w') as f:
                     json.dump(complete_with_metadata, f, indent=2)
                 
+                # Log best config parameters to SwanLab (no file saving)
+                swanlab.log({
+                    "hyperopt/best_config/learning_rate": complete_config.get('learning_rate', 0),
+                    "hyperopt/best_config/alpha": complete_config.get('alpha', 0),
+                    "hyperopt/best_config/beta": complete_config.get('beta', 0),
+                    "hyperopt/best_config/gamma": complete_config.get('gamma', 0),
+                    "hyperopt/best_config/hidden_dim": complete_config.get('hidden_dim', 0),
+                    "hyperopt/best_config/latent_dim": complete_config.get('latent_dim', 0),
+                    "hyperopt/best_config/weight_decay": complete_config.get('weight_decay', 0)
+                })
+                
+                # Log final summary to SwanLab
+                swanlab.log({
+                    "hyperopt/summary/total_trials": len(self.study.trials),
+                    "hyperopt/summary/successful_trials": len([t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
+                    "hyperopt/summary/complete_config_params": len(complete_config),
+                    "hyperopt/summary/optimization_completed": True
+                })
+                
                 self.logger.info(f"Saved complete best config with {len(complete_config)} parameters")
         
         # Save Optuna study
@@ -850,6 +951,9 @@ class MultiObjectiveOptimizer:
         self.logger.info("  - best_config_complete.json (complete best config)")
         self.logger.info("  - best_config_complete_with_metadata.json (complete config with metadata)")
         self.logger.info("  - optuna_study.pkl (Optuna study object)")
+        
+        # Finish SwanLab run
+        swanlab.finish()
     
     def _make_serializable(self, obj):
         """Make object JSON serializable"""
