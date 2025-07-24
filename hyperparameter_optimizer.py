@@ -96,7 +96,7 @@ class MultiObjectiveOptimizer:
         """Run coarse-grained parameter search"""
         def coarse_objective(trial):
             params = self._sample_coarse_parameters(trial)
-            return self._objective_function(trial, params, max_epochs=100)
+            return self._objective_function(trial, params, max_epochs=500)
         
         # Use self.study directly instead of creating separate study
         self.study.optimize(coarse_objective, n_trials=n_trials, n_jobs=self.n_parallel)
@@ -121,7 +121,7 @@ class MultiObjectiveOptimizer:
                 params = self._sample_fine_parameters(trial, base_params)
             else:
                 params = self._sample_parameters(trial)
-            return self._objective_function(trial, params, max_epochs=200)
+            return self._objective_function(trial, params, max_epochs=500)
         
         # Continue using self.study
         current_trial_count = len(self.study.trials)
@@ -142,7 +142,7 @@ class MultiObjectiveOptimizer:
                 params = self._sample_final_parameters(trial, best_params)
             else:
                 params = self._sample_parameters(trial)
-            return self._objective_function(trial, params, max_epochs=300, final_validation=True)
+            return self._objective_function(trial, params, max_epochs=500, final_validation=True)
         
         # Continue using self.study, but disable pruning for final validation
         # Temporarily disable pruner
@@ -321,6 +321,7 @@ class MultiObjectiveOptimizer:
                 f"hyperopt/trial_{trial.number}/quality_score": quality_score,
                 f"hyperopt/trial_{trial.number}/stability_score": stability_score,
                 f"hyperopt/trial_{trial.number}/converged_epoch": results.get('converged_epoch', 0),
+                f"hyperopt/trial_{trial.number}/best_cut_epoch": results.get('best_cut_epoch', 0),
                 
                 # Log hyperparameters
                 f"hyperopt/trial_{trial.number}/learning_rate": params.get('learning_rate', 0),
@@ -336,6 +337,9 @@ class MultiObjectiveOptimizer:
                 "hyperopt/trials_completed": trial.number + 1
             }
             swanlab.log(trial_data)
+            
+            # Store epoch information in trial user attributes for later retrieval
+            trial.set_user_attr('best_cut_epoch', results.get('best_cut_epoch', 0))
             
             # Log trial results with imbalance percentage
             self.logger.info(f"Trial {trial.number}: cut={cut_loss:.4f}, balance={balance_loss:.6f}, "
@@ -401,6 +405,7 @@ class MultiObjectiveOptimizer:
             model.train()
             best_cut_loss = float('inf')
             best_balance_loss = float('inf')
+            best_cut_epoch = 0
             epochs_without_improvement = 0
             early_stop_patience = 15
             
@@ -481,6 +486,7 @@ class MultiObjectiveOptimizer:
                     if avg_cut_loss < best_cut_loss:
                         best_cut_loss = avg_cut_loss
                         best_balance_loss = avg_balance_loss
+                        best_cut_epoch = epoch + 1  # Track epoch when best cut loss is achieved
                         improved = True
                     
                     if improved:
@@ -521,7 +527,8 @@ class MultiObjectiveOptimizer:
                 'quality_score': float(quality_score),
                 'stability_score': float(stability_score),
                 'converged_epoch': len(cut_losses_history),
-                'imbalance_pct': float(np.sqrt(final_balance_loss) * 100)
+                'imbalance_pct': float(np.sqrt(final_balance_loss) * 100),
+                'best_cut_epoch': best_cut_epoch
             }
             
         except optuna.TrialPruned:
@@ -536,7 +543,8 @@ class MultiObjectiveOptimizer:
                 'quality_score': 0.0,
                 'stability_score': 0.0,
                 'converged_epoch': 0,
-                'imbalance_pct': 100.0
+                'imbalance_pct': 100.0,
+                'best_cut_epoch': 0
             }
     
     def _calculate_quality_score(self, cut_losses: List[float], balance_losses: List[float]) -> float:
@@ -784,7 +792,8 @@ class MultiObjectiveOptimizer:
                         'cut_loss': cut_loss,
                         'balance_loss': balance_loss,
                         'imbalance_pct': torch.sqrt(torch.tensor(balance_loss)).item() * 100,
-                        'trial_id': trial.number
+                        'trial_id': trial.number,
+                        'best_cut_epoch': trial.user_attrs.get('best_cut_epoch', 0) if hasattr(trial, 'user_attrs') else 0
                     }
                     
                     if cut_loss < best_cut_loss:
@@ -806,7 +815,8 @@ class MultiObjectiveOptimizer:
                     analysis['best_quality'] = {
                         'params': trial.params, 
                         'quality': quality,
-                        'trial_id': trial.number
+                        'trial_id': trial.number,
+                        'best_cut_epoch': trial.user_attrs.get('best_cut_epoch', 0) if hasattr(trial, 'user_attrs') else 0
                     }
                     
                     if quality > best_quality:
@@ -817,7 +827,8 @@ class MultiObjectiveOptimizer:
             swanlab.log({
                 "hyperopt/final/best_cut_loss": best_cut_loss,
                 "hyperopt/final/best_cut_trial_id": analysis['best_cut_loss']['trial_id'],
-                "hyperopt/final/best_cut_imbalance_pct": analysis['best_cut_loss']['imbalance_pct']
+                "hyperopt/final/best_cut_imbalance_pct": analysis['best_cut_loss']['imbalance_pct'],
+                "hyperopt/final/best_cut_epoch": analysis['best_cut_loss']['best_cut_epoch']
             })
         
         if analysis['best_balance_loss']:
@@ -829,7 +840,8 @@ class MultiObjectiveOptimizer:
         if analysis['best_quality']:
             swanlab.log({
                 "hyperopt/final/best_quality_score": best_quality,
-                "hyperopt/final/best_quality_trial_id": analysis['best_quality']['trial_id']
+                "hyperopt/final/best_quality_trial_id": analysis['best_quality']['trial_id'],
+                "hyperopt/final/best_quality_cut_epoch": analysis['best_quality']['best_cut_epoch']
             })
         
         # Parameter importance analysis
