@@ -12,7 +12,7 @@ os.makedirs('./models', exist_ok=True)
 
 if __name__ == '__main__':
     torch.cuda.set_device(0)
-    set_seed(42)
+    set_seed(42, True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     parser = argparse.ArgumentParser()
     parser.add_argument('--filename', type=str, default='ibm02.hgr')

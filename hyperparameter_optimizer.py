@@ -309,7 +309,7 @@ class MultiObjectiveOptimizer:
                 balance_penalty = balance_loss * 10.0 + (imbalance_pct - 4.0) ** 2
 
             # Early pruning if cut loss too high or severe imbalance
-            if not final_validation and (cut_loss > 0.025 or imbalance_pct > 10.0) and trial.number > 10:
+            if cut_loss > 0.03 or imbalance_pct > 10.0:
                 raise optuna.TrialPruned()
             
             # Log trial results to SwanLab

@@ -67,17 +67,17 @@ if __name__ == '__main__':
     model = GraphPartitionModel(input_dim, hidden_dim, latent_dim, num_partitions, True)
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)  # Add weight decay
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=8, verbose=False)
     
     # Early stopping variables
-    best_loss = float('inf')
+    # best_loss = float('inf')
+    min_ncut_loss = float('inf')
     patience_counter = 0
     patience = 10
     
     model.train()
     for epoch in range(num_epochs):
         losses, kl_losses, hyperedge_cut_losses, balance_losses = [], [], [], []
-        min_ncut_loss = float('inf')
         for data in dataloader:
             data = data.to(device)
             optimizer.zero_grad()
@@ -127,13 +127,13 @@ if __name__ == '__main__':
         scheduler.step(epoch_loss)
         
         # Early stopping and best model saving
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
+        if epoch_cut_loss < min_ncut_loss:
+            min_ncut_loss = epoch_cut_loss
             patience_counter = 0
             torch.save(model.state_dict(), './models/model.best.pt')
             # Log best model metrics to SwanLab
             swanlab.log({
-                "train/best_loss": best_loss,
+                "train/best_ncut_loss": min_ncut_loss,
                 "train/best_epoch": epoch + 1
             })
             print(f'New best model saved at epoch {epoch + 1}')
@@ -151,7 +151,7 @@ if __name__ == '__main__':
     
     # Log final training summary
     swanlab.log({
-        "train/final_best_loss": best_loss,
+        "train/final_best_ncut_loss": min_ncut_loss,
         "train/total_epochs_completed": epoch + 1
     })
     

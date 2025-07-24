@@ -85,7 +85,7 @@ class VariationalEncoder(nn.Module):
     def forward(self, data: Union[Data, HyperData]):
         x = data.x if isinstance(data, Data) else data.x
         edge_index = data.hyperedge_index if isinstance(data, HyperData) else data.edge_index
-        x = F.dropout(x, p=0.1, training=self.training)  # Add input dropout
+        # x = F.dropout(x, p=0.1, training=self.training)  # Add input dropout
         x_clone = x.clone()
         if self.training:
             num_nodes = x_clone.size(0)
