@@ -9,6 +9,7 @@ import warnings
 from typing import Dict, Any, List, Tuple
 from pathlib import Path
 import pickle
+import pandas as pd
 import multiprocessing as mp
 
 from hyperopt_config import HyperOptConfig, NormalizationMethod
@@ -147,107 +148,122 @@ class MultiObjectiveOptimizer:
         }
     
     def _sample_coarse_parameters(self, trial) -> Dict[str, Any]:
-        """Sample parameters for coarse search with broader ranges"""
+        """Sample parameters for coarse search with broader ranges (仅包含实际使用的参数)"""
         params = {}
         
-        # Use broader ranges for coarse search, prioritizing cut loss
+        # 核心训练参数
         params['learning_rate'] = trial.suggest_loguniform('learning_rate', 1e-5, 1e-2)
-        params['beta'] = trial.suggest_uniform('beta', 15.0, 40.0)  # Higher cut loss weight
-        params['gamma'] = trial.suggest_uniform('gamma', 0.3, 3.0)  # Lower balance weight
+        params['weight_decay'] = trial.suggest_loguniform('weight_decay', 1e-6, 1e-3)
+        
+        # 损失函数权重 - 优先cut loss
         params['alpha'] = trial.suggest_loguniform('alpha', 1e-5, 1e-2)
+        params['beta'] = trial.suggest_uniform('beta', 15.0, 40.0)  # 更高cut loss权重
+        params['gamma'] = trial.suggest_uniform('gamma', 0.3, 3.0)  # 较低balance权重
         
-        # Architecture parameters
+        # 模型架构参数
         params['hidden_dim'] = trial.suggest_categorical('hidden_dim', [128, 256, 512])
-        params['dropout_rate'] = trial.suggest_uniform('dropout_rate', 0.0, 0.4)
-        params['mask_rate'] = trial.suggest_uniform('mask_rate', 0.1, 0.3)
+        params['latent_dim'] = trial.suggest_categorical('latent_dim', [32, 64, 128])
         
-        # Normalization
-        # params['norm_method'] = trial.suggest_categorical('norm_method', 
-        #     [NormalizationMethod.STANDARD, NormalizationMethod.ROBUST, NormalizationMethod.UNIT_NORM])
+        # 优化器调度参数
+        params['scheduler_factor'] = trial.suggest_uniform('scheduler_factor', 0.2, 0.7)
+        params['scheduler_patience'] = trial.suggest_int('scheduler_patience', 5, 15)
+        
+        # 训练技巧（可选）
+        params['gradient_clip'] = trial.suggest_uniform('gradient_clip', 0.5, 2.0)
         
         return params
     
     def _sample_fine_parameters(self, trial, base_params: Dict) -> Dict[str, Any]:
-        """Sample parameters around a good configuration for fine-tuning"""
+        """Sample parameters around a good configuration for fine-tuning (仅包含实际使用的参数)"""
         params = base_params.copy()
         
-        # Fine-tune around base values with cut loss priority
+        # 在基础参数附近细调核心参数
         if 'learning_rate' in base_params:
             base_lr = base_params['learning_rate']
             params['learning_rate'] = trial.suggest_loguniform('learning_rate', 
                 base_lr * 0.3, base_lr * 3.0)
         
+        if 'weight_decay' in base_params:
+            base_wd = base_params['weight_decay']
+            params['weight_decay'] = trial.suggest_loguniform('weight_decay',
+                base_wd * 0.1, base_wd * 10.0)
+        
         if 'beta' in base_params:
             base_beta = base_params['beta']
-            # Keep beta high for cut loss priority
+            # 保持beta高权重用于cut loss优先
             params['beta'] = trial.suggest_uniform('beta', 
                 max(10.0, base_beta * 0.7), base_beta * 1.3)
         
         if 'gamma' in base_params:
             base_gamma = base_params['gamma']
-            # Keep gamma low but sufficient for balance
+            # 保持gamma在合理范围
             params['gamma'] = trial.suggest_uniform('gamma',
                 max(0.1, base_gamma * 0.5), min(base_gamma * 1.5, 3.0))
         
-        # Add additional parameters for fine-tuning
-        params['weight_decay'] = trial.suggest_loguniform('weight_decay', 1e-6, 1e-3)
-        params['scheduler_factor'] = trial.suggest_uniform('scheduler_factor', 0.3, 0.7)
-        params['gradient_clip'] = trial.suggest_uniform('gradient_clip', 0.5, 2.0)
+        if 'alpha' in base_params:
+            base_alpha = base_params['alpha']
+            params['alpha'] = trial.suggest_loguniform('alpha',
+                base_alpha * 0.1, base_alpha * 10.0)
+        
+        # 调度器参数微调
+        if 'scheduler_factor' in base_params:
+            base_factor = base_params['scheduler_factor']
+            params['scheduler_factor'] = trial.suggest_uniform('scheduler_factor',
+                max(0.1, base_factor * 0.7), min(base_factor * 1.3, 0.8))
+        
+        if 'scheduler_patience' in base_params:
+            base_patience = base_params['scheduler_patience']
+            params['scheduler_patience'] = trial.suggest_int('scheduler_patience',
+                max(3, base_patience - 3), base_patience + 3)
+        
+        # 梯度裁剪微调
+        if 'gradient_clip' in base_params:
+            base_clip = base_params['gradient_clip']
+            params['gradient_clip'] = trial.suggest_uniform('gradient_clip',
+                max(0.1, base_clip * 0.5), base_clip * 2.0)
         
         return params
     
     def _sample_final_parameters(self, trial, best_params: Dict) -> Dict[str, Any]:
-        """Sample parameters for final validation with minimal variation"""
+        """Sample parameters for final validation with minimal variation (仅包含实际使用的参数)"""
         params = best_params.copy()
         
-        # Very small variations for final validation
+        # 最小变化用于最终验证
         if 'learning_rate' in best_params:
             base_lr = best_params['learning_rate']
-            # Use loguniform to be consistent with other stages
             params['learning_rate'] = trial.suggest_loguniform('learning_rate',
                 base_lr * 0.8, base_lr * 1.2)
         
-        # Add ensemble parameters
-        params['num_seeds'] = trial.suggest_int('num_seeds', 3, 5)  # Multiple seeds for robustness
+        # 其他参数保持不变或最小调整
+        if 'weight_decay' in best_params:
+            base_wd = best_params['weight_decay']
+            params['weight_decay'] = trial.suggest_loguniform('weight_decay',
+                base_wd * 0.5, base_wd * 2.0)
         
         return params
     
     def _sample_parameters(self, trial) -> Dict[str, Any]:
-        """Sample full parameter set"""
+        """Sample full parameter set (仅包含实际使用的参数)"""
         params = {}
         
-        # Training parameters
-        params['epochs'] = trial.suggest_int('epochs', 80, 250)
+        # 核心训练参数
         params['learning_rate'] = trial.suggest_loguniform('learning_rate', 1e-5, 5e-3)
         params['weight_decay'] = trial.suggest_loguniform('weight_decay', 1e-6, 1e-3)
         
-        # Architecture
+        # 模型架构参数
         params['hidden_dim'] = trial.suggest_categorical('hidden_dim', [128, 256, 512, 768])
         params['latent_dim'] = trial.suggest_categorical('latent_dim', [32, 64, 128, 256])
         
-        # Regularization
-        params['dropout_rate'] = trial.suggest_uniform('dropout_rate', 0.0, 0.5)
-        params['mask_rate'] = trial.suggest_uniform('mask_rate', 0.1, 0.4)
+        # 损失函数权重 - 优先cut loss最小化和balance约束
+        params['alpha'] = trial.suggest_loguniform('alpha', 1e-5, 5e-3)  # KL正则化
+        params['beta'] = trial.suggest_uniform('beta', 10.0, 50.0)  # 更高cut loss权重
+        params['gamma'] = trial.suggest_uniform('gamma', 0.5, 5.0)   # balance权重
         
-        # Loss weights - Prioritize cut loss minimization with balance constraint
-        params['alpha'] = trial.suggest_loguniform('alpha', 1e-5, 5e-3)  # KL regularization
-        params['beta'] = trial.suggest_uniform('beta', 10.0, 50.0)  # Much higher for cut loss priority
-        params['gamma'] = trial.suggest_uniform('gamma', 0.5, 5.0)   # Lower range, just enough for balance
-        
-        # Advanced features
-        params['adaptive_weights'] = trial.suggest_categorical('adaptive_weights', [True, False])
-        params['loss_annealing'] = trial.suggest_categorical('loss_annealing', [True, False])
-        
-        # Feature normalization
-        # params['norm_method'] = trial.suggest_categorical('norm_method', list(NormalizationMethod))
-        # params['feature_scaling'] = trial.suggest_uniform('feature_scaling', 0.7, 1.5)
-        # params['spectral_norm'] = trial.suggest_categorical('spectral_norm', [True, False])
-        
-        # Optimization
-        params['scheduler_type'] = trial.suggest_categorical('scheduler_type', 
-            ['plateau', 'cosine', 'step'])
+        # 优化器调度参数
         params['scheduler_patience'] = trial.suggest_int('scheduler_patience', 5, 15)
         params['scheduler_factor'] = trial.suggest_uniform('scheduler_factor', 0.2, 0.7)
+        
+        # 训练技巧
         params['gradient_clip'] = trial.suggest_uniform('gradient_clip', 0.3, 3.0)
         
         return params
@@ -515,6 +531,170 @@ class MultiObjectiveOptimizer:
         
         return np.mean([cut_stability, balance_stability])
     
+    def _merge_best_parameters(self) -> Dict:
+        """从不同trial中合并最佳参数组合"""
+        completed_trials = [t for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        if not completed_trials:
+            return {}
+        
+        # 按目标值排序找到最佳试验
+        best_cut_trial = min(completed_trials, key=lambda t: t.values[0])  # 最低cut loss
+        best_balance_trial = min(completed_trials, key=lambda t: t.values[1])  # 最低balance loss
+        
+        merged_config = {}
+        
+        # 优先使用cut loss最佳的核心参数
+        core_params = ['learning_rate', 'alpha', 'beta', 'gamma', 'hidden_dim', 'latent_dim', 'weight_decay']
+        for param in core_params:
+            if param in best_cut_trial.params:
+                merged_config[param] = best_cut_trial.params[param]
+        
+        # 补充其他参数 - 从性能最佳的trial中获取
+        all_params_found = set()
+        for trial in completed_trials:
+            all_params_found.update(trial.params.keys())
+        
+        for param in all_params_found:
+            if param not in merged_config:
+                # 从最佳性能trial中获取（按cut loss排序）
+                best_trial_for_param = min(
+                    [t for t in completed_trials if param in t.params],
+                    key=lambda t: t.values[0]
+                )
+                merged_config[param] = best_trial_for_param.params[param]
+        
+        self.logger.info(f"Merged parameters from {len(completed_trials)} trials, found {len(merged_config)} parameters")
+        return merged_config
+    
+    def _get_complete_best_config(self) -> Dict:
+        """获取包含所有参数的完整最佳配置"""
+        if not self.study.best_trials:
+            return {}
+        
+        # 首先尝试合并最佳参数
+        merged_config = self._merge_best_parameters()
+        
+        # 定义默认参数（仅包含实际使用的参数）
+        default_params = {
+            # 核心训练参数
+            'learning_rate': 5e-5,
+            'weight_decay': 1e-5,
+            
+            # 模型架构参数
+            'hidden_dim': 256,
+            'latent_dim': 64,
+            
+            # 损失函数权重
+            'alpha': 0.001,     # KL散度权重
+            'beta': 20.0,       # Cut损失权重
+            'gamma': 1.5,       # Balance损失权重
+            
+            # 优化器调度参数
+            'scheduler_factor': 0.5,
+            'scheduler_patience': 8,
+            
+            # 训练技巧
+            'gradient_clip': 1.0
+        }
+        
+        # 填充缺失参数
+        complete_config = merged_config.copy()
+        missing_params = []
+        
+        for param, default_value in default_params.items():
+            if param not in complete_config:
+                complete_config[param] = default_value
+                missing_params.append(param)
+        
+        if missing_params:
+            self.logger.info(f"Filled {len(missing_params)} missing parameters with defaults: {missing_params}")
+        
+        # 参数验证和调整
+        complete_config = self._validate_and_adjust_config(complete_config)
+        
+        return complete_config
+    
+    def _validate_and_adjust_config(self, config: Dict) -> Dict:
+        """验证和调整配置参数（仅检查实际使用的参数）"""
+        adjusted_config = config.copy()
+        
+        # 确保数值参数在合理范围内
+        adjustments = []
+        
+        # 学习率范围检查
+        if adjusted_config.get('learning_rate', 0) < 1e-6:
+            adjusted_config['learning_rate'] = 1e-5
+            adjustments.append('learning_rate (too small)')
+        elif adjusted_config.get('learning_rate', 0) > 1e-1:
+            adjusted_config['learning_rate'] = 1e-2
+            adjustments.append('learning_rate (too large)')
+        
+        # 权重衰减检查
+        if adjusted_config.get('weight_decay', 0) < 1e-7:
+            adjusted_config['weight_decay'] = 1e-6
+            adjustments.append('weight_decay (too small)')
+        elif adjusted_config.get('weight_decay', 0) > 1e-2:
+            adjusted_config['weight_decay'] = 1e-3
+            adjustments.append('weight_decay (too large)')
+        
+        # Beta和Gamma权重检查
+        if adjusted_config.get('beta', 0) < 1.0:
+            adjusted_config['beta'] = 5.0
+            adjustments.append('beta (too small)')
+        elif adjusted_config.get('beta', 0) > 100.0:
+            adjusted_config['beta'] = 50.0
+            adjustments.append('beta (too large)')
+            
+        if adjusted_config.get('gamma', 0) < 0.1:
+            adjusted_config['gamma'] = 0.5
+            adjustments.append('gamma (too small)')
+        elif adjusted_config.get('gamma', 0) > 10.0:
+            adjusted_config['gamma'] = 5.0
+            adjustments.append('gamma (too large)')
+        
+        # Alpha权重检查
+        if adjusted_config.get('alpha', 0) < 1e-6:
+            adjusted_config['alpha'] = 1e-5
+            adjustments.append('alpha (too small)')
+        elif adjusted_config.get('alpha', 0) > 1e-1:
+            adjusted_config['alpha'] = 1e-2
+            adjustments.append('alpha (too large)')
+        
+        # 模型维度检查
+        if adjusted_config.get('hidden_dim', 0) not in [128, 256, 512, 768]:
+            adjusted_config['hidden_dim'] = 256
+            adjustments.append('hidden_dim (invalid value)')
+        
+        if adjusted_config.get('latent_dim', 0) not in [32, 64, 128, 256]:
+            adjusted_config['latent_dim'] = 64
+            adjustments.append('latent_dim (invalid value)')
+        
+        # 调度器参数检查
+        if adjusted_config.get('scheduler_factor', 0) <= 0 or adjusted_config.get('scheduler_factor', 0) >= 1:
+            adjusted_config['scheduler_factor'] = 0.5
+            adjustments.append('scheduler_factor (invalid range)')
+        
+        if adjusted_config.get('scheduler_patience', 0) < 1:
+            adjusted_config['scheduler_patience'] = 5
+            adjustments.append('scheduler_patience (too small)')
+        elif adjusted_config.get('scheduler_patience', 0) > 50:
+            adjusted_config['scheduler_patience'] = 15
+            adjustments.append('scheduler_patience (too large)')
+        
+        # 梯度裁剪检查
+        if adjusted_config.get('gradient_clip', 0) <= 0:
+            adjusted_config['gradient_clip'] = 0.5
+            adjustments.append('gradient_clip (too small)')
+        elif adjusted_config.get('gradient_clip', 0) > 10.0:
+            adjusted_config['gradient_clip'] = 3.0
+            adjustments.append('gradient_clip (too large)')
+        
+        if adjustments:
+            self.logger.info(f"Adjusted invalid parameters: {adjustments}")
+        
+        return adjusted_config
+    
     def _analyze_results(self) -> Dict:
         """Analyze optimization results and find best configurations"""
         if not self.study.best_trials:
@@ -523,13 +703,24 @@ class MultiObjectiveOptimizer:
         # Multi-criteria analysis
         best_trials = self.study.best_trials[:10]  # Top 10 trials
         
+        # 获取完整的最佳配置（新的核心功能）
+        complete_best_config = self._get_complete_best_config()
+        
         analysis = {
-            'best_overall': best_trials[0].params if best_trials else {},
+            'best_overall': complete_best_config,  # 使用完整配置替代原始best_overall
+            'best_overall_incomplete': best_trials[0].params if best_trials else {},  # 保留原始数据供参考
             'best_cut_loss': None,
             'best_balance_loss': None,
             'best_quality': None,
             'parameter_importance': {},
-            'convergence_analysis': {}
+            'convergence_analysis': {},
+            'config_completeness': {
+                'complete_params_count': len(complete_best_config),
+                'merged_from_trials': len(self.study.trials),
+                'has_all_core_params': all(param in complete_best_config for param in [
+                    'learning_rate', 'alpha', 'beta', 'gamma', 'hidden_dim', 'latent_dim', 'weight_decay'
+                ])
+            }
         }
         
         # Find specialized best configurations
@@ -543,26 +734,71 @@ class MultiObjectiveOptimizer:
                         'params': trial.params, 
                         'cut_loss': cut_loss,
                         'balance_loss': balance_loss,
-                        'imbalance_pct': torch.sqrt(torch.tensor(balance_loss)).item() * 100
+                        'imbalance_pct': torch.sqrt(torch.tensor(balance_loss)).item() * 100,
+                        'trial_id': trial.number
                     }
                 
                 # Best balance loss  
                 if analysis['best_balance_loss'] is None or balance_loss < analysis['best_balance_loss']['balance_loss']:
-                    analysis['best_balance_loss'] = {'params': trial.params, 'balance_loss': balance_loss}
+                    analysis['best_balance_loss'] = {
+                        'params': trial.params, 
+                        'balance_loss': balance_loss,
+                        'trial_id': trial.number
+                    }
                 
                 # Best quality
                 quality = -neg_quality
                 if analysis['best_quality'] is None or quality > analysis['best_quality']['quality']:
-                    analysis['best_quality'] = {'params': trial.params, 'quality': quality}
+                    analysis['best_quality'] = {
+                        'params': trial.params, 
+                        'quality': quality,
+                        'trial_id': trial.number
+                    }
         
         # Parameter importance analysis
         try:
             importance = optuna.importance.get_param_importances(self.study)
             analysis['parameter_importance'] = importance
-        except:
+        except Exception as e:
+            self.logger.warning(f"Could not compute parameter importance: {e}")
             pass
         
+        # 添加配置比较信息
+        self._add_config_comparison(analysis)
+        
         return analysis
+    
+    def _add_config_comparison(self, analysis: Dict):
+        """添加不同配置之间的比较信息"""
+        if not analysis['best_overall']:
+            return
+        
+        complete_config = analysis['best_overall']
+        incomplete_config = analysis['best_overall_incomplete']
+        
+        # 比较完整配置和不完整配置的差异
+        missing_in_incomplete = set(complete_config.keys()) - set(incomplete_config.keys())
+        different_values = {}
+        
+        for key in incomplete_config.keys():
+            if key in complete_config and incomplete_config[key] != complete_config[key]:
+                different_values[key] = {
+                    'incomplete': incomplete_config[key],
+                    'complete': complete_config[key]
+                }
+        
+        analysis['config_comparison'] = {
+            'missing_params_in_original': list(missing_in_incomplete),
+            'different_values': different_values,
+            'params_added_count': len(missing_in_incomplete),
+            'params_changed_count': len(different_values)
+        }
+        
+        self.logger.info(f"Config comparison: {len(missing_in_incomplete)} params added, {len(different_values)} params changed")
+    
+    def get_complete_best_config(self) -> Dict:
+        """公共接口：获取完整的最佳配置"""
+        return self._get_complete_best_config()
     
     def _save_results(self, results: Dict):
         """Save comprehensive results"""
@@ -572,16 +808,48 @@ class MultiObjectiveOptimizer:
             serializable_results = self._make_serializable(results)
             json.dump(serializable_results, f, indent=2)
         
-        # Save best configurations
+        # Save best configurations (原始和完整)
         if 'best_config' in results and results['best_config']:
+            # 保存原有的best_config（向后兼容）
             with open(self.output_dir / 'best_config.json', 'w') as f:
                 json.dump(results['best_config'], f, indent=2)
+            
+            # 保存完整的最佳配置（新功能）
+            complete_config = results['best_config'].get('best_overall', {})
+            if complete_config:
+                with open(self.output_dir / 'best_config_complete.json', 'w') as f:
+                    json.dump(complete_config, f, indent=2)
+                
+                # 同时保存一个带元数据的完整配置文件
+                complete_with_metadata = {
+                    'config': complete_config,
+                    'metadata': {
+                        'generated_by': 'GraphPart Multi-stage Hyperparameter Optimizer',
+                        'timestamp': pd.Timestamp.now().isoformat(),
+                        'total_trials': len(self.study.trials),
+                        'best_trial_id': results['best_config'].get('best_overall_incomplete', {}).get('trial_id', 'unknown'),
+                        'completeness_info': results['best_config'].get('config_completeness', {}),
+                        'comparison_info': results['best_config'].get('config_comparison', {}),
+                        'note': 'This configuration combines the best parameters from multiple optimization trials and fills missing parameters with validated defaults.'
+                    }
+                }
+                
+                with open(self.output_dir / 'best_config_complete_with_metadata.json', 'w') as f:
+                    json.dump(complete_with_metadata, f, indent=2)
+                
+                self.logger.info(f"Saved complete best config with {len(complete_config)} parameters")
         
         # Save Optuna study
         with open(self.output_dir / 'optuna_study.pkl', 'wb') as f:
             pickle.dump(self.study, f)
         
         self.logger.info(f"Results saved to {self.output_dir}")
+        self.logger.info("Files generated:")
+        self.logger.info("  - optimization_results.json (complete results)")
+        self.logger.info("  - best_config.json (original best config)")
+        self.logger.info("  - best_config_complete.json (complete best config)")
+        self.logger.info("  - best_config_complete_with_metadata.json (complete config with metadata)")
+        self.logger.info("  - optuna_study.pkl (Optuna study object)")
     
     def _make_serializable(self, obj):
         """Make object JSON serializable"""
