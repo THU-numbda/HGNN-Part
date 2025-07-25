@@ -291,7 +291,7 @@ class MultiObjectiveOptimizer:
         """
         try:
             # Train model with given parameters
-            results = self._train_with_params(params, max_epochs)
+            results = self._train_with_params(params, max_epochs, trial)
             
             cut_loss = results['final_cut_loss']
             balance_loss = results['final_balance_loss']
@@ -314,27 +314,12 @@ class MultiObjectiveOptimizer:
             
             # Log trial results to SwanLab
             trial_data = {
-                f"hyperopt/trial_{trial.number}/cut_loss": cut_loss,
-                f"hyperopt/trial_{trial.number}/balance_loss": balance_loss,
-                f"hyperopt/trial_{trial.number}/balance_penalty": balance_penalty,
-                f"hyperopt/trial_{trial.number}/imbalance_pct": imbalance_pct,
-                f"hyperopt/trial_{trial.number}/quality_score": quality_score,
-                f"hyperopt/trial_{trial.number}/stability_score": stability_score,
-                f"hyperopt/trial_{trial.number}/converged_epoch": results.get('converged_epoch', 0),
-                f"hyperopt/trial_{trial.number}/best_cut_epoch": results.get('best_cut_epoch', 0),
-                
-                # Log hyperparameters
                 f"hyperopt/trial_{trial.number}/learning_rate": params.get('learning_rate', 0),
                 f"hyperopt/trial_{trial.number}/alpha": params.get('alpha', 0),
                 f"hyperopt/trial_{trial.number}/beta": params.get('beta', 0),
                 f"hyperopt/trial_{trial.number}/gamma": params.get('gamma', 0),
                 f"hyperopt/trial_{trial.number}/hidden_dim": params.get('hidden_dim', 0),
                 f"hyperopt/trial_{trial.number}/latent_dim": params.get('latent_dim', 0),
-                
-                # Summary metrics for comparison
-                "hyperopt/current_best_cut": cut_loss,
-                "hyperopt/current_best_balance": balance_loss,
-                "hyperopt/trials_completed": trial.number + 1
             }
             swanlab.log(trial_data)
             
@@ -348,16 +333,14 @@ class MultiObjectiveOptimizer:
             # Return objectives (minimize cut/balance_penalty, maximize quality/stability)
             return cut_loss, balance_penalty, -quality_score, -stability_score
             
+        except optuna.TrialPruned:
+            self.logger.info(f"Trial {trial.number} pruned by Optuna")
+            raise
         except Exception as e:
-            self.logger.error(f"Trial failed: {str(e)}")
-            # Return worst possible values for failed trials
-            swanlab.log({
-                f"hyperopt/trial_{trial.number}/failed": True,
-                f"hyperopt/trial_{trial.number}/error": str(e)
-            })
+            self.logger.error(f"Trial {trial.number} failed: {str(e)}")
             return 1.0, 1.0, -0.0, -0.0
     
-    def _train_with_params(self, params: Dict, max_epochs: int) -> Dict:
+    def _train_with_params(self, params: Dict, max_epochs: int, trial=None) -> Dict:
         """Train model with given parameters and return real metrics"""
         import numpy as np
         
@@ -474,9 +457,21 @@ class MultiObjectiveOptimizer:
                     avg_loss = np.mean(epoch_losses)
                     avg_cut_loss = np.mean(epoch_cut_losses)
                     avg_balance_loss = np.mean(epoch_balance_losses)
+                    avg_kl_loss = np.mean(epoch_kl_losses)
                     
                     cut_losses_history.append(avg_cut_loss)
                     balance_losses_history.append(avg_balance_loss)
+                    
+                    # Log detailed loss progression to SwanLab for each trial
+                    if trial is not None:
+                        epoch_data = {
+                            f"trials/trial_{trial.number}/epoch": epoch + 1,
+                            f"trials/trial_{trial.number}/losses/total": avg_loss,
+                            f"trials/trial_{trial.number}/losses/cut": avg_cut_loss,
+                            f"trials/trial_{trial.number}/losses/balance": avg_balance_loss,
+                            f"trials/trial_{trial.number}/losses/kl": avg_kl_loss
+                        }
+                        swanlab.log(epoch_data)
                     
                     # Learning rate scheduling
                     scheduler.step(avg_loss)
