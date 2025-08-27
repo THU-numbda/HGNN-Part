@@ -116,7 +116,7 @@ class PartitionDecoder(nn.Module):
 
 class GraphPartitionModel(VGAE):
     def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, num_partitions=2, use_hypergraph=False):
-        super().__init__(VariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
+        super().__init__(OldVariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
         self.num_partitions = num_partitions
         self.log_vars = nn.Parameter(torch.zeros(3))
         self.use_hypergraph = use_hypergraph
@@ -179,7 +179,7 @@ class GraphPartitionModel(VGAE):
         z = self.encode(data)
         Y = self.decode(z)
         return Y
-    
+
     def sample(self, data: Data, m=1):
         if data.x is None or data.x.size(0) == 0:
             raise ValueError("Invalid input: empty or None node features")

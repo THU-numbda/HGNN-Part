@@ -36,44 +36,41 @@ if __name__ == '__main__':
     parser.add_argument('--beta', type=float, default=20)     # Cut loss priority
     parser.add_argument('--gamma', type=float, default=1.5)   # Balance constraint
     parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--latent_dim', type=int, default=64)
+    parser.add_argument('--hidden_dim', type=int, default=256)
     args = parser.parse_args()
     
     # Initialize SwanLab
     swanlab.init(
-        project="GraphPart",
-        experiment_name=f"vgae_lr{args.lr}_a{args.alpha}_b{args.beta}_g{args.gamma}",
+        project="GraphPart_Train",
+        experiment_name=f"vgae_lr{args.lr}_a{args.alpha}_b{args.beta}_g{args.gamma}_d{args.latent_dim}_h{args.hidden_dim}",
         config={
             "learning_rate": args.lr,
             "alpha": args.alpha,
             "beta": args.beta,  
             "gamma": args.gamma,
             "epochs": args.epochs,
-            "input_dim": 7,
-            "latent_dim": 64,
-            "hidden_dim": 256,
-            "num_partitions": 2,
-            "batch_size": 1,
-            "weight_decay": 1e-5,
-            "patience": 10
+            "latent_dim": args.latent_dim,
+            "hidden_dim": args.hidden_dim
         }
     )
     dataset = ISPDDataset('/data1/tongsb/GraphPart/dataset/pt/train')
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
     input_dim = 7
-    latent_dim = 64
-    hidden_dim = 256
+    latent_dim = args.latent_dim
+    hidden_dim = args.hidden_dim
     num_partitions = 2
     num_epochs = args.epochs
     model = GraphPartitionModel(input_dim, hidden_dim, latent_dim, num_partitions, True)
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)  # Add weight decay
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=8, verbose=False)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)  # Add weight decay
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.39835247130777407, patience=7, verbose=False)
     
     # Early stopping variables
     # best_loss = float('inf')
     min_ncut_loss = float('inf')
     patience_counter = 0
-    patience = 10
+    patience = 15
     
     model.train()
     for epoch in range(num_epochs):
@@ -88,7 +85,7 @@ if __name__ == '__main__':
             loss, kl_loss, hyperedge_cut_loss, balance_loss = model.combined_loss(Y, W, D, alpha=args.alpha, beta=args.beta, gamma=args.gamma)
             if not loss.isnan():
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Enable gradient clipping
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.8451623846714802)  # Enable gradient clipping
                 optimizer.step()
                 losses.append(loss.item())
                 kl_losses.append(kl_loss.item())
@@ -124,7 +121,7 @@ if __name__ == '__main__':
         print(f'Epoch {epoch + 1}, Loss: {epoch_loss:.4e}, KL Loss: {epoch_kl_loss:.4e}, Ncut Loss: {epoch_cut_loss:.4e}, Balance Loss: {epoch_balance_loss:.4e}, Peak Memory: {peak_memory_gb:.2f} GB')
         
         # Learning rate scheduling
-        scheduler.step(epoch_loss)
+        # scheduler.step(epoch_loss)
         
         # Early stopping and best model saving
         if epoch_cut_loss < min_ncut_loss:
@@ -146,7 +143,7 @@ if __name__ == '__main__':
             break
             
     # Save final model
-    final_model_path = f'./models/model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt'
+    final_model_path = f'./models/model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.{args.latent_dim}.{args.hidden_dim}.pt'
     torch.save(model.state_dict(), final_model_path)
     
     # Log final training summary
@@ -154,8 +151,8 @@ if __name__ == '__main__':
         "train/final_best_ncut_loss": min_ncut_loss,
         "train/total_epochs_completed": epoch + 1
     })
-    
-    print(f'Final model saved as model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.pt')
-    
+
+    print(f'Final model saved as model.{args.lr:.0e}.{args.alpha:.0e}.{args.beta:.0e}.{args.gamma:.0e}.{args.latent_dim}.{args.hidden_dim}.pt')
+
     # Finish SwanLab run
     swanlab.finish()
