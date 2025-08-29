@@ -12,6 +12,7 @@ from scipy.sparse.linalg import svds
 import easypart as easypart
 import kahypar as kahypar
 import ray
+from config import paths
 
 def basic_randomized_svds(X, k, q=2, s=10):
     m, n = X.shape
@@ -154,12 +155,15 @@ def compute_topological_features(adj_matrix: coo_matrix, d: int, adj_normalize: 
 
 def create_partition_id_feature(num_nodes, filename):
     partition_feature = []
-    os.system(f'./exec/hmetis2.0pre1 ./data/{filename} 2 -ufactor=2 -ptype=rb -otype=cut -nruns=1 -seed=42 > /dev/null')
-    with open(f'./data/{filename}.part.2', 'r') as f:
+    hmetis_path = paths.get_exec_path('hmetis2.0pre1')
+    data_file_path = paths.get_data_path(filename)
+    partition_file_path = paths.get_partition_file_path(filename)
+    os.system(f'{hmetis_path} {data_file_path} 2 -ufactor=2 -ptype=rb -otype=cut -nruns=1 -seed=42 > /dev/null')
+    with open(partition_file_path, 'r') as f:
         for line in f:
             partition_id = int(line.strip())
             partition_feature.append(partition_id)
-    os.system(f'rm ./data/{filename}.part.2')
+    os.system(f'rm {partition_file_path}')
     if len(partition_feature) != num_nodes:
         print('Partition feature length does not match number of nodes!')
     partition_feature = np.array(partition_feature)
@@ -223,7 +227,8 @@ def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_par
     channel = subprocess.DEVNULL
     num_nodes = len(hypergraph_vertices)
     num_nets = len(hypergraph_edges)
-    with open(f'./data/{filename}.part.2.{id}', 'w') as f:
+    partition_file_with_id = paths.get_partition_file_with_id_path(filename, id)
+    with open(partition_file_with_id, 'w') as f:
         for i in range(len(partition)):
             f.write(f'{partition[i]}\n')
 
@@ -242,7 +247,7 @@ def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_par
         params.epsilon = 0.02
         params.part_num = 2
         params.thread = 1
-        easypart.partition(hypergraph, params, f'./data/{filename}.part.2.{id}')
+        easypart.partition(hypergraph, params, partition_file_with_id)
         # command = ['./exec/EasyPart', '-g', f'./data/{filename}', '-e', '0.04', '-p', '2', '-t', '1', '-m', 'quality', '-f', f'./data/{filename}.part.2.{id}', '-o', '1']
         # try:
         #     subprocess.run(command, shell=False, stdout=channel, stderr=channel)
@@ -252,12 +257,12 @@ def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_par
     if use_kahypar:
         hypergraph = kahypar.Hypergraph(num_nodes, num_nets, hyperedge_indices, hyperedges, num_partitions)
         context = kahypar.Context()
-        context.loadINIconfiguration("./exec/cut_kKaHyPar_sea20.ini")
+        context.loadINIconfiguration(paths.get_exec_path("cut_kKaHyPar_sea20.ini"))
         context.setK(num_partitions)
         context.setEpsilon(0.04)
-        context.setInputPartitionFileName(f'./data/{filename}.part.2.{id}')
+        context.setInputPartitionFileName(partition_file_with_id)
         context.writePartitionFile(True)
-        context.setPartitionFileName(f'./data/{filename}.part.2.{id}')
+        context.setPartitionFileName(partition_file_with_id)
         context.suppressOutput(True)
         kahypar.partition(hypergraph, context)
         # command = ['./exec/KaHyPar', '-h', f'./data/{filename}', '-k', '2', '-e', '0.04', '-o', 'cut', '-m', 'direct', '-p', './exec/cut_kKaHyPar_sea20.ini', '--part-file', f'./data/{filename}.part.2.{id}', '-w', '1']
@@ -268,11 +273,11 @@ def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_par
 
     partition_id = np.zeros(num_nodes)
     index = 0
-    with open(f'./data/{filename}.part.2.{id}', 'r') as f:
+    with open(partition_file_with_id, 'r') as f:
         for line in f:
             partition_id[index] = int(line.strip())
             index += 1
-    command = ['rm', f'./data/{filename}.part.2.{id}']
+    command = ['rm', partition_file_with_id]
     try:
         # os.remove(f'./data/{filename}.part.2.{id}')
         subprocess.run(command, shell=False, stdout=channel, stderr=channel)

@@ -6,10 +6,11 @@ import multiprocessing as mp
 from transformers import set_seed
 from utils import *
 from models import GraphPartitionModel
+from config import paths
 # import ray
 
 # Ensure models directory exists
-os.makedirs('./models', exist_ok=True)
+paths.MODELS_DIR.mkdir(exist_ok=True)
 
 if __name__ == '__main__':
     # ray.init(num_cpus=12)
@@ -29,7 +30,7 @@ if __name__ == '__main__':
     modelname = args.modelname
     num_partitions = args.num_partitions
     preprocess_time = 0
-    with open(f'./data/{filename}', 'r') as f:
+    with open(paths.get_data_path(filename), 'r') as f:
         lines = f.readlines()
         num_nets, num_nodes = map(int, lines[0].split())
         hypergraph_vertices = list(range(num_nodes))
@@ -49,7 +50,7 @@ if __name__ == '__main__':
     hidden_dim = args.hidden_dim
     num_partitions = 2
     model = GraphPartitionModel(input_dim, hidden_dim, latent_dim, num_partitions, True)
-    model.load_state_dict(torch.load(f'./models/{modelname}', map_location=device))
+    model.load_state_dict(torch.load(paths.get_model_path(modelname), map_location=device))
     model = model.to(device)
     model.eval()
     # hypergraph_vertices_ref = ray.put(hypergraph_vertices)
