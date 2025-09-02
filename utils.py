@@ -1,20 +1,18 @@
 import numpy as np
 import scipy.sparse as sp
 from scipy.linalg import eigh
-from scipy.sparse.linalg import eigs, eigsh
+from scipy.sparse.linalg import eigs, eigsh, svds
 from scipy.sparse import coo_matrix
 from models import HyperData
 import torch
 import os
 from typing import Tuple
 import subprocess
-from scipy.sparse.linalg import svds
+from config import paths
 import easypart as easypart
 import kahypar as kahypar
-import ray
-from config import paths
 
-def basic_randomized_svds(X, k, q=2, s=10):
+def basic_randomized_svds(X, k, q=5, s=10):
     m, n = X.shape
     if k + s > min(m, n):
         raise ValueError("k + s must be less than or equal to the minimum dimension of X")
@@ -39,7 +37,7 @@ def generate_sparse_sign_matrix(n, h, z):
         S[indices, j] = signs
     return S
 
-def randomized_svds_with_sparse_matrix(X, k, q=2, s=10):
+def randomized_svds_with_sparse_matrix(X, k, q=5, s=10):
     m, n = X.shape
     if k + s > min(m, n):
         raise ValueError("k + s must be less than or equal to the minimum dimension of X")
@@ -70,7 +68,7 @@ def eigSVD(A):
     U = (A @ V) / S
     return U, S, V
 
-def freigs(A, k, q=2, s=10):
+def freigs(A, k, q=5, s=10):
     n = A.shape[0]
     Omega = np.random.randn(n, k + s)
     Y = A @ Omega
@@ -138,9 +136,6 @@ def compute_topological_features(adj_matrix: coo_matrix, d: int, adj_normalize: 
     # laplace_data = np.concatenate((data, rowsum))
     # diag = np.arange(len(rowsum))
     # laplace = coo_matrix((laplace_data, (np.concatenate((adj_matrix.row, diag)), np.concatenate((adj_matrix.col, diag)))), shape=(len(rowsum), len(rowsum)))
-    # if adj_normalize:
-    #    laplace = normalize_adj(laplace)
-    # lamb, X = eigsh(laplace, d)
     if adj_normalize:
        adj_matrix = normalize_adj(adj_matrix)
     lamb, X = eigsh(adj_matrix, d) if not use_sketch else freigs(adj_matrix, d, 5)
@@ -189,16 +184,13 @@ def preprocess_data(hypergraph_vertices, hypergraph_edges, filename, num_nodes, 
     partition_feature = create_partition_id_feature(len(hypergraph_vertices), filename)
     features = np.column_stack([clique_topo_features, star_topo_features, node_degree, pin_count, partition_feature])
     del adj_matrix, node_degree, pin_count, clique_topo_features, star_topo_features, H, U, S, Vt
-    # Safe feature normalization with numerical stability
     deg_feature_norm = np.linalg.norm(features[:, 4])
-    eps = 1e-8  # Small epsilon to prevent division by zero
-    
     for i in [0, 1, 2, 3, 5, 6]:
         feature_norm = np.linalg.norm(features[:, i])
-        if feature_norm > eps:  # Only normalize if norm is significant
+        if feature_norm > 1e-8:
             features[:, i] = features[:, i] / feature_norm * deg_feature_norm
         else:
-            features[:, i] = 0.0  # Set to zero if norm is too small
+            features[:, i] = 0.0
     hyperedge_index = torch.tensor(np.array([
         np.concatenate(hypergraph_edges),
         np.repeat(np.arange(len(hypergraph_edges)), [len(e) for e in hypergraph_edges])
@@ -222,7 +214,6 @@ def evaluate_partition(partition: np.ndarray, hypergraph_vertices, hypergraph_ed
     imbalance = np.max((partition_weights - np.mean(partition_weights)) / np.mean(partition_weights))
     return cut, imbalance
 
-# @ray.remote
 def evalPoint(id: int, partition, hypergraph_vertices, hypergraph_edges, num_partitions, filename, use_easypart=True, use_kahypar=False):
     channel = subprocess.DEVNULL
     num_nodes = len(hypergraph_vertices)

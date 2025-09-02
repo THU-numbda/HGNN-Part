@@ -19,7 +19,7 @@ class HyperData(Data):
         self.hyperedge_index = self.hyperedge_index.to(device)
         return self
 
-class OldVariationalEncoder(nn.Module):
+class VariationalEncoder(nn.Module):
     def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, use_hypergraph=False):
         super().__init__()
         self.conv1 = HypergraphConv(input_dim, hidden_dim) if use_hypergraph else GraphConv(input_dim, hidden_dim)
@@ -58,7 +58,7 @@ class OldVariationalEncoder(nn.Module):
         logstd = self.fc_logstd(x4, edge_index)
         return mu, logstd
 
-class VariationalEncoder(nn.Module):
+class NewVariationalEncoder(nn.Module):
     def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, use_hypergraph=False):
         super().__init__()
         self.conv1 = HypergraphConv(input_dim, hidden_dim) if use_hypergraph else GraphConv(input_dim, hidden_dim)
@@ -85,7 +85,7 @@ class VariationalEncoder(nn.Module):
     def forward(self, data: Union[Data, HyperData]):
         x = data.x if isinstance(data, Data) else data.x
         edge_index = data.hyperedge_index if isinstance(data, HyperData) else data.edge_index
-        # x = F.dropout(x, p=0.1, training=self.training)  # Add input dropout
+        # x = F.dropout(x, p=0.2, training=self.training)
         x_clone = x.clone()
         if self.training:
             num_nodes = x_clone.size(0)
@@ -116,14 +116,13 @@ class PartitionDecoder(nn.Module):
 
 class GraphPartitionModel(VGAE):
     def __init__(self, input_dim=7, hidden_dim=256, latent_dim=64, num_partitions=2, use_hypergraph=False):
-        super().__init__(OldVariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
+        super().__init__(VariationalEncoder(input_dim, hidden_dim, latent_dim, use_hypergraph), PartitionDecoder(latent_dim, num_partitions))
         self.num_partitions = num_partitions
         self.log_vars = nn.Parameter(torch.zeros(3))
         self.use_hypergraph = use_hypergraph
 
     def normalized_cut_loss(self, Y: torch.Tensor, W: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
         ncut = torch.tensor(0.0, device=Y.device)
-        eps = 1e-8  # Small epsilon to prevent division by zero
         for g in range(self.num_partitions):
             Y_g = Y[:, g]
             indices = W._indices()
@@ -131,7 +130,7 @@ class GraphPartitionModel(VGAE):
             row, col = indices[0, :], indices[1, :]
             cut_values = Y_g[row] * (1 - Y_g[col]) * values
             partition_volume = (Y_g @ D).sum()
-            ncut += cut_values.sum() / torch.clamp(partition_volume, min=eps)
+            ncut += cut_values.sum() / torch.clamp(partition_volume, min=1e-8)
         return ncut
     
     def hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
@@ -152,10 +151,9 @@ class GraphPartitionModel(VGAE):
     def normalized_hyperedge_cut_loss(self, Y: torch.Tensor, W: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
         cut_loss = self.hyperedge_cut_loss(Y, W)
         partition_degrees = (D * Y).sum(dim=0)
-        eps = 1e-8  # Small epsilon to prevent division by zero
-        return cut_loss * torch.sum(torch.pow(torch.clamp(partition_degrees, min=eps), -1))
+        return cut_loss * torch.sum(torch.pow(torch.clamp(partition_degrees, min=1e-8), -1))
     
-    def combined_loss(self, Y, W, D, alpha=0.0005, beta=5, gamma=1):
+    def combined_loss(self, Y, W, D, alpha=0.0005, beta=0.5, gamma=100):
         kl_loss = self.kl_loss()
         ncut_loss = self.normalized_hyperedge_cut_loss(Y, W, D) if self.use_hypergraph else self.normalized_cut_loss(Y, W, D)
         balance_loss_val = self.balance_loss(Y)
@@ -184,7 +182,7 @@ class GraphPartitionModel(VGAE):
         if data.x is None or data.x.size(0) == 0:
             raise ValueError("Invalid input: empty or None node features")
         mu, logstd = self.encoder(data)
-        logstd = torch.clamp(logstd, min=-10, max=10)  # Clamp both sides for stability
+        logstd = torch.clamp(logstd, min=-10, max=10)
         samples = []
         for _ in range(m):
             eps = torch.randn_like(logstd, device=data.x.device)

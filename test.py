@@ -7,13 +7,10 @@ from transformers import set_seed
 from utils import *
 from models import GraphPartitionModel
 from config import paths
-# import ray
 
-# Ensure models directory exists
 paths.MODELS_DIR.mkdir(exist_ok=True)
 
 if __name__ == '__main__':
-    # ray.init(num_cpus=12)
     set_seed(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     parser = argparse.ArgumentParser()
@@ -53,8 +50,6 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load(paths.get_model_path(modelname), map_location=device))
     model = model.to(device)
     model.eval()
-    # hypergraph_vertices_ref = ray.put(hypergraph_vertices)
-    # hypergraph_edges_ref = ray.put(hypergraph_edges)
     best_cut, best_imbalance = evaluate_partition(initial_partition, hypergraph_vertices, hypergraph_edges, num_partitions)
     best_partition_id = initial_partition
     reason_time = 0
@@ -69,8 +64,6 @@ if __name__ == '__main__':
         processes = []
         pool = mp.Pool(processes=12)
         for m, partition in enumerate(partitions):
-            # ref = evalPoint.remote(m, partition, hypergraph_vertices_ref, hypergraph_edges_ref, num_partitions, filename, False, True)
-            # processes.append(ref)
             processes.append(pool.apply_async(evalPoint, (m, partitions[m], hypergraph_vertices, hypergraph_edges, num_partitions, filename, True, True)))
             time.sleep(0.01)
         pool.close()
@@ -88,4 +81,3 @@ if __name__ == '__main__':
         best_partition_id = best_partition_id / np.linalg.norm(best_partition_id) * np.linalg.norm(data.x[:, 4].cpu().numpy())
         data.x[:, 6] = torch.tensor(best_partition_id, dtype=torch.float).to(device)
     print(f'Final Best Cut: {best_cut}, Imbalance: {best_imbalance:.3f}, Preprocess Time: {preprocess_time:.3f}, Reasoning Time: {reason_time:.3f}, V-Cycle Time: {vcycle_time:.3f}')
-    # ray.shutdown()
