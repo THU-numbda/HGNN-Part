@@ -241,3 +241,7 @@ model.<lr>.<alpha>.<beta>.<gamma>.<latent_dim>.<hidden_dim>.pt
 ```
 
 Example: `model.5e-04.5e-04.5e-01.1e+02.64.256.pt`
+
+## Publication
+
+[1] Shengbo Tong, Rufan Zhou, Chunyan Pei, and Wenjian Yu, "HGNN-Part: A high-quality hypergraph partitioner based on hypergraph generative model," in Proc. Design, Automation & Test in Europe Conference (DATE), Verona, Italy, Apr. 2026.
