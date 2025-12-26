@@ -32,7 +32,7 @@ HGNN-Part is a deep learning framework for hypergraph partitioning that leverage
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://anonymous.4open.science/r/HGNN-Part.git
+git clone https://github.com/THU-numbda/HGNN-Part.git
 cd HGNN-Part
 ```
 
